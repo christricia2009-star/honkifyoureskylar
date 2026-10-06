@@ -1,0 +1,23 @@
+{
+  "vins": ["YOUR_VIN"],
+  "config": {
+    "hostname": "telemetry.example.com",
+    "port": 443,
+    "ca": "-----BEGIN CERTIFICATE-----\nPASTE_THE_FLEET_TELEMETRY_SERVER_CA_CHAIN\n-----END CERTIFICATE-----\n",
+    "prefer_typed": true,
+    "fields": {
+      "VehicleSpeed": { "interval_seconds": 10, "minimum_delta": 1 },
+      "Gear": { "interval_seconds": 10 },
+      "Location": { "interval_seconds": 10 },
+      "Soc": { "interval_seconds": 60 },
+      "EstBatteryRange": { "interval_seconds": 60 },
+      "ChargeState": { "interval_seconds": 60 },
+      "DoorState": { "interval_seconds": 10 },
+      "Locked": { "interval_seconds": 10 },
+      "DriverSeatOccupied": { "interval_seconds": 10 },
+      "GuestModeEnabled": { "interval_seconds": 10 }
+    },
+    "alert_types": ["service"],
+    "exp": 1800000000
+  }
+}

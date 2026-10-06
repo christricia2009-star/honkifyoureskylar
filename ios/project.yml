@@ -1,0 +1,31 @@
+name: Honk
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Honk:
+    type: application
+    platform: iOS
+    sources:
+      - path: Honk
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.honkifyoureskylar
+        PRODUCT_NAME: Honk
+        INFOPLIST_FILE: Honk/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Honk/Honk.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+    entitlements:
+      path: Honk/Honk.entitlements
+      properties:
+        aps-environment: development
