@@ -11,3 +11,5 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 .idea/
+.vercel/
+docs/.vercel/
