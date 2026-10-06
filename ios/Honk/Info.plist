@@ -42,8 +42,15 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Honk compares this phone with the Tesla so a walk, a bike, a run, or a different car is not treated as this Tesla. Location stays on this phone.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Honk compares this phone with the Tesla so a walk, a bike, a run, or a different car is not treated as this Tesla.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Honk uses motion to tell a walk, a bike, a run, and a car apart while comparing this phone with the Tesla.</string>
 	<key>UIBackgroundModes</key>
 	<array>
+		<string>location</string>
 		<string>remote-notification</string>
 	</array>
 	<key>UILaunchScreen</key>

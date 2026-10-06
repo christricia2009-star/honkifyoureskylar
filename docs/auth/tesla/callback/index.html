@@ -6,6 +6,22 @@
   <meta name="robots" content="noindex">
   <title>Callback · Honk if You're Skylar</title>
   <link rel="stylesheet" href="../../../assets/style.css">
+  <script>
+    (function () {
+      var q = new URLSearchParams(window.location.search);
+      var code = q.get("code");
+      var err = q.get("error");
+      var state = q.get("state") || "";
+      var target = "";
+      if (code) {
+        target = "honkifyoureskylar://auth?tesla_code=" + encodeURIComponent(code) + "&state=" + encodeURIComponent(state);
+      } else if (err) {
+        target = "honkifyoureskylar://auth?error=" + encodeURIComponent(err);
+      }
+      if (!target) return;
+      window.location.replace(target);
+    })();
+  </script>
 </head>
 <body>
   <main>

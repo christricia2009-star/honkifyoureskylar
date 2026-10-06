@@ -14,11 +14,15 @@
 		76313313437B160DF360DB36 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC37FA1F1F34F9E76C791FEC /* AppModel.swift */; };
 		F2A566B923CEE7B881C0C9C7 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50517DDCCDD0FB3DED96141 /* Models.swift */; };
 		FEC7FA3C5C14D21BFA1F2696 /* HonkApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F2AF723C2D720C8DCC6FB89 /* HonkApp.swift */; };
+		B22C1F82B22C1F82B22C1F82 /* PhoneTrail.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0E71A11B0E71A11B0E71 /* PhoneTrail.swift */; };
+		D44E3194D44E3194D44E3194 /* TripStory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C33D2083C33D2083C33D2083 /* TripStory.swift */; };
+		F66053B6F66053B6F66053B6 /* TripScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = E55F42A5E55F42A5E55F42A5 /* TripScreens.swift */; };
+		B88D1F22B88D1F22B88D1F22 /* LogScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A77C0E11A77C0E11A77C0E11 /* LogScreens.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		2979982F5F88497A5E598A64 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		388C3B5EDC2AA14546048F9E /* Honk.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Honk.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		388C3B5EDC2AA14546048F9E /* Honk.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Honk.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3F2AF723C2D720C8DCC6FB89 /* HonkApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HonkApp.swift; sourceTree = "<group>"; };
 		47F5E7DA6AC77410E7E3D3D2 /* Screens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Screens.swift; sourceTree = "<group>"; };
 		4850DB5DFD85201374E97084 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -27,6 +31,10 @@
 		826CC30B7BDD36A0E66DC775 /* Honk.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Honk.entitlements; sourceTree = "<group>"; };
 		CC37FA1F1F34F9E76C791FEC /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		F50517DDCCDD0FB3DED96141 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		A11B0E71A11B0E71A11B0E71 /* PhoneTrail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneTrail.swift; sourceTree = "<group>"; };
+		C33D2083C33D2083C33D2083 /* TripStory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripStory.swift; sourceTree = "<group>"; };
+		E55F42A5E55F42A5E55F42A5 /* TripScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripScreens.swift; sourceTree = "<group>"; };
+		A77C0E11A77C0E11A77C0E11 /* LogScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogScreens.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -40,7 +48,11 @@
 				3F2AF723C2D720C8DCC6FB89 /* HonkApp.swift */,
 				2979982F5F88497A5E598A64 /* Info.plist */,
 				F50517DDCCDD0FB3DED96141 /* Models.swift */,
+				A11B0E71A11B0E71A11B0E71 /* PhoneTrail.swift */,
 				47F5E7DA6AC77410E7E3D3D2 /* Screens.swift */,
+				A77C0E11A77C0E11A77C0E11 /* LogScreens.swift */,
+				E55F42A5E55F42A5E55F42A5 /* TripScreens.swift */,
+				C33D2083C33D2083C33D2083 /* TripStory.swift */,
 				56032C8D2AE833CA76656C77 /* Theme.swift */,
 			);
 			path = Honk;
@@ -137,6 +149,10 @@
 				FEC7FA3C5C14D21BFA1F2696 /* HonkApp.swift in Sources */,
 				F2A566B923CEE7B881C0C9C7 /* Models.swift in Sources */,
 				5C0FF1CAA27A553F0933EC93 /* Screens.swift in Sources */,
+				B22C1F82B22C1F82B22C1F82 /* PhoneTrail.swift in Sources */,
+				D44E3194D44E3194D44E3194 /* TripStory.swift in Sources */,
+				B88D1F22B88D1F22B88D1F22 /* LogScreens.swift in Sources */,
+				F66053B6F66053B6F66053B6 /* TripScreens.swift in Sources */,
 				604BF270ECE93E9485205FEC /* Theme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -153,10 +169,12 @@
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Honk/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Honk if You're Skylar";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.honkifyoureskylar;
 				PRODUCT_NAME = Honk;
 				SDKROOT = iphoneos;
@@ -239,10 +257,12 @@
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Honk/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Honk if You're Skylar";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.honkifyoureskylar;
 				PRODUCT_NAME = Honk;
 				SDKROOT = iphoneos;

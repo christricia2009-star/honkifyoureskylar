@@ -42,6 +42,17 @@ func (s *Signer) SignFleetConfig(config map[string]any) (string, error) {
 
 // PostTelemetryConfig sends the unsigned config through the vehicle-command
 // proxy, which signs it and posts the JWS to Fleet API.
+// PostCommand signs one vehicle command and posts it through the vehicle-command proxy.
+func (s *Signer) PostCommand(ctx context.Context, teslaToken, vin, name string, payload []byte) (int, []byte, error) {
+	req := httptest.NewRequest(http.MethodPost, "https://fleet.local/api/1/vehicles/"+vin+"/command/"+name, bytes.NewReader(payload))
+	req = req.WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+teslaToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.proxy.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.Bytes(), nil
+}
+
 func (s *Signer) PostTelemetryConfig(ctx context.Context, teslaToken string, payload []byte) (int, []byte, error) {
 	req := httptest.NewRequest(http.MethodPost, "https://fleet.local/api/1/vehicles/fleet_telemetry_config", bytes.NewReader(payload))
 	req = req.WithContext(ctx)

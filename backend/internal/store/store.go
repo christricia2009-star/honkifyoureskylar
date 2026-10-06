@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,8 +21,8 @@ import (
 const timeLayout = "2006-01-02T15:04:05.000000000Z"
 
 type Session struct {
-	ID    string
-	Demo  bool
+	ID     string
+	Demo   bool
 	Expiry time.Time
 }
 
@@ -55,8 +56,34 @@ func Open(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`ALTER TABLE snapshots ADD COLUMN detail TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	if _, err := s.db.Exec(`ALTER TABLE vehicles ADD COLUMN access TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE trips ADD COLUMN start_soc REAL`,
+		`ALTER TABLE trips ADD COLUMN end_soc REAL`,
+		`ALTER TABLE trips ADD COLUMN start_rated REAL`,
+		`ALTER TABLE trips ADD COLUMN end_rated REAL`,
+		`ALTER TABLE trips ADD COLUMN range_kind TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE trips ADD COLUMN start_kwh REAL`,
+		`ALTER TABLE trips ADD COLUMN end_kwh REAL`,
+		`ALTER TABLE trips ADD COLUMN kwh_kind TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	return nil
 }
 
 func NewID() string {
@@ -255,9 +282,10 @@ func (s *Store) UpsertVehicle(v model.Vehicle) error {
 	if v.LastSeen != nil {
 		seen = stamp(*v.LastSeen)
 	}
-	_, err := s.db.Exec(`INSERT INTO vehicles (vin, demo, name, state, last_seen) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(vin) DO UPDATE SET name = excluded.name, state = excluded.state, last_seen = excluded.last_seen, demo = excluded.demo`,
-		v.VIN, boolInt(v.Demo), v.Name, v.State, seen)
+	_, err := s.db.Exec(`INSERT INTO vehicles (vin, demo, name, state, last_seen, access) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(vin) DO UPDATE SET name = excluded.name, state = excluded.state, last_seen = excluded.last_seen, demo = excluded.demo,
+		access = CASE WHEN excluded.access = '' THEN vehicles.access ELSE excluded.access END`,
+		v.VIN, boolInt(v.Demo), v.Name, v.State, seen, v.Access)
 	return err
 }
 
@@ -271,8 +299,8 @@ func (s *Store) vehicle(vin string) (model.Vehicle, error) {
 	var v model.Vehicle
 	var demo int
 	var seen sql.NullString
-	err := s.db.QueryRow(`SELECT vin, demo, name, state, last_seen FROM vehicles WHERE vin = ?`, vin).
-		Scan(&v.VIN, &demo, &v.Name, &v.State, &seen)
+	err := s.db.QueryRow(`SELECT vin, demo, name, state, last_seen, access FROM vehicles WHERE vin = ?`, vin).
+		Scan(&v.VIN, &demo, &v.Name, &v.State, &seen, &v.Access)
 	if err != nil {
 		return model.Vehicle{}, err
 	}
@@ -326,17 +354,18 @@ func (s *Store) SaveSnapshot(sn model.Snapshot) error {
 
 func (s *Store) saveSnapshot(sn model.Snapshot) error {
 	_, err := s.db.Exec(`INSERT INTO snapshots
-		(vin, speed_mph, gear, lat, lng, soc, range_mi, charge_state, doors_open, door_summary, locked, seat, guest, odometer, updated_at, inside_home, speed_over, have_doors)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(vin, speed_mph, gear, lat, lng, soc, range_mi, charge_state, doors_open, door_summary, locked, seat, guest, odometer, updated_at, inside_home, speed_over, have_doors, detail)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(vin) DO UPDATE SET
 		speed_mph = excluded.speed_mph, gear = excluded.gear, lat = excluded.lat, lng = excluded.lng,
 		soc = excluded.soc, range_mi = excluded.range_mi, charge_state = excluded.charge_state,
 		doors_open = excluded.doors_open, door_summary = excluded.door_summary, locked = excluded.locked,
 		seat = excluded.seat, guest = excluded.guest, odometer = excluded.odometer, updated_at = excluded.updated_at,
-		inside_home = excluded.inside_home, speed_over = excluded.speed_over, have_doors = excluded.have_doors`,
+		inside_home = excluded.inside_home, speed_over = excluded.speed_over, have_doors = excluded.have_doors,
+		detail = excluded.detail`,
 		sn.VIN, nullFloat(sn.SpeedMph), sn.Gear, nullFloat(sn.Lat), nullFloat(sn.Lng), nullFloat(sn.Soc), nullFloat(sn.RangeMi),
 		sn.ChargeState, boolInt(sn.DoorsOpen), sn.DoorSummary, nullBool(sn.Locked), nullBool(sn.Seat), nullBool(sn.Guest),
-		nullFloat(sn.Odometer), stamp(sn.UpdatedAt), nullBool(sn.InsideHome), boolInt(sn.SpeedOver), boolInt(sn.HaveDoors))
+		nullFloat(sn.Odometer), stamp(sn.UpdatedAt), nullBool(sn.InsideHome), boolInt(sn.SpeedOver), boolInt(sn.HaveDoors), sn.Detail)
 	return err
 }
 
@@ -352,10 +381,10 @@ func (s *Store) snapshot(vin string) (model.Snapshot, error) {
 	var locked, seat, guest, inside sql.NullInt64
 	var doors, speedOver, haveDoors int
 	var updated string
-	err := s.db.QueryRow(`SELECT vin, speed_mph, gear, lat, lng, soc, range_mi, charge_state, doors_open, door_summary, locked, seat, guest, odometer, updated_at, inside_home, speed_over, have_doors
+	err := s.db.QueryRow(`SELECT vin, speed_mph, gear, lat, lng, soc, range_mi, charge_state, doors_open, door_summary, locked, seat, guest, odometer, updated_at, inside_home, speed_over, have_doors, detail
 		FROM snapshots WHERE vin = ?`, vin).Scan(
 		&sn.VIN, &speed, &sn.Gear, &lat, &lng, &soc, &rangeMi, &sn.ChargeState, &doors, &sn.DoorSummary,
-		&locked, &seat, &guest, &odo, &updated, &inside, &speedOver, &haveDoors)
+		&locked, &seat, &guest, &odo, &updated, &inside, &speedOver, &haveDoors, &sn.Detail)
 	if err != nil {
 		return model.Snapshot{}, err
 	}
@@ -374,6 +403,46 @@ func (s *Store) snapshot(vin string) (model.Snapshot, error) {
 	sn.HaveDoors = haveDoors == 1
 	sn.UpdatedAt, _ = parseStamp(updated)
 	return sn, nil
+}
+
+func (s *Store) InsertGrab(vin string, demo bool, state, summary, facts string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if facts == "" {
+		facts = "[]"
+	}
+	_, err := s.db.Exec(`INSERT INTO grabs (id, vin, demo, taken_at, state, summary, facts) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		NewID(), vin, boolInt(demo), stamp(at), state, summary, facts)
+	return err
+}
+
+func (s *Store) Grabs(vin string, limit int) ([]model.Grab, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, vin, taken_at, state, summary, facts FROM grabs WHERE vin = ? ORDER BY taken_at DESC LIMIT ?`, vin, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Grab
+	for rows.Next() {
+		var g model.Grab
+		var taken, facts string
+		if err := rows.Scan(&g.ID, &g.VIN, &taken, &g.State, &g.Summary, &facts); err != nil {
+			return nil, err
+		}
+		when, _ := parseStamp(taken)
+		g.TakenAt = model.APITime(when)
+		_ = json.Unmarshal([]byte(facts), &g.Facts)
+		if g.Facts == nil {
+			g.Facts = []model.Fact{}
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) SaveTrip(tr model.Trip) error {
@@ -395,16 +464,22 @@ func (s *Store) saveTrip(tr model.Trip) error {
 		park = stamp(*tr.ParkSince)
 	}
 	_, err = s.db.Exec(`INSERT INTO trips
-		(id, vin, demo, started_at, ended_at, max_speed_mph, distance_mi, over_limit, polyline, start_odo, end_odo, seat, guest, park_since, pending_close, callout)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, vin, demo, started_at, ended_at, max_speed_mph, distance_mi, over_limit, polyline, start_odo, end_odo, seat, guest, park_since, pending_close, callout,
+		 start_soc, end_soc, start_rated, end_rated, range_kind, start_kwh, end_kwh, kwh_kind)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		ended_at = excluded.ended_at, max_speed_mph = excluded.max_speed_mph, distance_mi = excluded.distance_mi,
 		over_limit = excluded.over_limit, polyline = excluded.polyline, start_odo = excluded.start_odo,
 		end_odo = excluded.end_odo, seat = excluded.seat, guest = excluded.guest, park_since = excluded.park_since,
-		pending_close = excluded.pending_close, callout = excluded.callout`,
+		pending_close = excluded.pending_close, callout = excluded.callout,
+		start_soc = excluded.start_soc, end_soc = excluded.end_soc, start_rated = excluded.start_rated,
+		end_rated = excluded.end_rated, range_kind = excluded.range_kind, start_kwh = excluded.start_kwh,
+		end_kwh = excluded.end_kwh, kwh_kind = excluded.kwh_kind`,
 		tr.ID, tr.VIN, boolInt(tr.Demo), stamp(tr.StartedAt), ended, tr.MaxSpeedMph, tr.DistanceMiles, boolInt(tr.OverLimit),
 		string(poly), nullFloat(tr.StartOdo), nullFloat(tr.EndOdo), nullBool(tr.SeatOccupied), nullBool(tr.GuestMode),
-		park, boolInt(tr.PendingClose), tr.Callout)
+		park, boolInt(tr.PendingClose), tr.Callout,
+		nullFloat(tr.StartSoc), nullFloat(tr.EndSoc), nullFloat(tr.StartRated), nullFloat(tr.EndRated), tr.RangeKind,
+		nullFloat(tr.StartKwh), nullFloat(tr.EndKwh), tr.KwhKind)
 	return err
 }
 
@@ -439,9 +514,12 @@ func (s *Store) trip(id string) (model.Trip, error) {
 	var ended, park sql.NullString
 	var poly string
 	var startOdo, endOdo sql.NullFloat64
+	var startSoc, endSoc, startRated, endRated, startKwh, endKwh sql.NullFloat64
 	var seat, guest sql.NullInt64
-	err := s.db.QueryRow(`SELECT id, vin, demo, started_at, ended_at, max_speed_mph, distance_mi, over_limit, polyline, start_odo, end_odo, seat, guest, park_since, pending_close, callout
-		FROM trips WHERE id = ?`, id).Scan(&tr.ID, &tr.VIN, &demo, &started, &ended, &tr.MaxSpeedMph, &tr.DistanceMiles, &over, &poly, &startOdo, &endOdo, &seat, &guest, &park, &pending, &tr.Callout)
+	err := s.db.QueryRow(`SELECT id, vin, demo, started_at, ended_at, max_speed_mph, distance_mi, over_limit, polyline, start_odo, end_odo, seat, guest, park_since, pending_close, callout,
+		start_soc, end_soc, start_rated, end_rated, range_kind, start_kwh, end_kwh, kwh_kind
+		FROM trips WHERE id = ?`, id).Scan(&tr.ID, &tr.VIN, &demo, &started, &ended, &tr.MaxSpeedMph, &tr.DistanceMiles, &over, &poly, &startOdo, &endOdo, &seat, &guest, &park, &pending, &tr.Callout,
+		&startSoc, &endSoc, &startRated, &endRated, &tr.RangeKind, &startKwh, &endKwh, &tr.KwhKind)
 	if err != nil {
 		return model.Trip{}, err
 	}
@@ -463,6 +541,12 @@ func (s *Store) trip(id string) (model.Trip, error) {
 	}
 	tr.StartOdo = floatPtr(startOdo)
 	tr.EndOdo = floatPtr(endOdo)
+	tr.StartSoc = floatPtr(startSoc)
+	tr.EndSoc = floatPtr(endSoc)
+	tr.StartRated = floatPtr(startRated)
+	tr.EndRated = floatPtr(endRated)
+	tr.StartKwh = floatPtr(startKwh)
+	tr.EndKwh = floatPtr(endKwh)
 	tr.SeatOccupied = boolPtr(seat)
 	tr.GuestMode = boolPtr(guest)
 	if poly != "" {
@@ -788,7 +872,8 @@ CREATE TABLE IF NOT EXISTS vehicles (
 	demo INTEGER NOT NULL,
 	name TEXT NOT NULL,
 	state TEXT NOT NULL,
-	last_seen TEXT
+	last_seen TEXT,
+	access TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS snapshots (
 	vin TEXT PRIMARY KEY,
@@ -808,7 +893,17 @@ CREATE TABLE IF NOT EXISTS snapshots (
 	updated_at TEXT,
 	inside_home INTEGER,
 	speed_over INTEGER,
-	have_doors INTEGER
+	have_doors INTEGER,
+	detail TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS grabs (
+	id TEXT PRIMARY KEY,
+	vin TEXT NOT NULL,
+	demo INTEGER NOT NULL,
+	taken_at TEXT NOT NULL,
+	state TEXT NOT NULL,
+	summary TEXT NOT NULL,
+	facts TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trips (
 	id TEXT PRIMARY KEY,
@@ -859,5 +954,61 @@ CREATE TABLE IF NOT EXISTS device_tokens (
 CREATE TABLE IF NOT EXISTS acks (
 	id TEXT PRIMARY KEY,
 	at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS charges (
+	id TEXT PRIMARY KEY,
+	vin TEXT NOT NULL,
+	demo INTEGER NOT NULL,
+	started_at TEXT NOT NULL,
+	ended_at TEXT,
+	last_seen TEXT NOT NULL,
+	soc_start REAL,
+	soc_end REAL,
+	energy_kwh REAL,
+	kind TEXT NOT NULL DEFAULT '',
+	open INTEGER NOT NULL,
+	one_reading INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS drains (
+	id TEXT PRIMARY KEY,
+	vin TEXT NOT NULL,
+	demo INTEGER NOT NULL,
+	started_at TEXT NOT NULL,
+	ended_at TEXT,
+	last_seen TEXT NOT NULL,
+	soc_start REAL,
+	soc_end REAL,
+	range_start REAL,
+	range_end REAL,
+	open INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS battery_points (
+	vin TEXT NOT NULL,
+	at TEXT NOT NULL,
+	odometer REAL NOT NULL,
+	range_mi REAL,
+	soc REAL,
+	PRIMARY KEY (vin, at)
+);
+CREATE TABLE IF NOT EXISTS software (
+	vin TEXT NOT NULL,
+	version TEXT NOT NULL,
+	first_seen TEXT NOT NULL,
+	last_seen TEXT NOT NULL,
+	notes TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (vin, version)
+);
+CREATE TABLE IF NOT EXISTS car_alerts (
+	vin TEXT NOT NULL,
+	name TEXT NOT NULL,
+	at TEXT NOT NULL,
+	audience TEXT NOT NULL DEFAULT '',
+	detail TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (vin, name, at)
+);
+CREATE TABLE IF NOT EXISTS live_cache (
+	key TEXT PRIMARY KEY,
+	body TEXT NOT NULL,
+	fetched_at TEXT NOT NULL
 );
 `

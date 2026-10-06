@@ -20,25 +20,32 @@ enum PendingConfirm {
 
 @MainActor
 @Observable
-final class AppModel: ASWebAuthenticationPresentationContextProviding {
+final class AppModel {
     var token: String?
     var health: Health?
     var garage: Garage?
     var trips: [Trip] = []
     var drivers = DriversPage(drivers: [], problem: "", note: "")
     var alerts: [HonkAlert] = []
+    var carAlerts: [CarAlert] = []
+    var carAlertProblem = ""
+    var log: LogPage?
+    var chargers = ChargersPage(sites: [], problem: nil, note: nil)
+    var service = ServicePage(facts: [], problem: nil, note: nil)
+    var invites = InvitesPage(invites: [], problem: nil, note: nil, message: nil)
     var settings: Settings?
     var setup: SetupPage?
     var banner: String?
     var busy = false
     var pending: PendingConfirm?
+    private var armedConfirm: PendingConfirm?
     private var primedAlerts = false
     private var seenAlerts = Set<String>()
     private var pushObserver: NSObjectProtocol?
     private var streamTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var authSession: ASWebAuthenticationSession?
-    private let presenter = UIWindow()
+    private let signInPresenter = TeslaSignInPresenter()
 
     var signedIn: Bool { token != nil }
     private var client: APIClient {
@@ -55,6 +62,7 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
             }
         }
         guard token != nil else { return }
+        PhoneTrail.shared.start()
         await refreshAll()
         listen()
         requestNotifications()
@@ -73,6 +81,19 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
     }
 
     func signIn() {
+        Task { await beginTeslaSignIn() }
+    }
+
+    private func beginTeslaSignIn() async {
+        await reloadHealth()
+        guard health?.teslaConfigured == true else {
+            if health == nil {
+                banner = "The Honk server on this Mac is not running. Start it on port 8080, then try Sign in with Tesla again."
+            } else {
+                banner = "This server has no Tesla client id yet."
+            }
+            return
+        }
         let url = client.url("/auth/tesla/start")
         let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "honkifyoureskylar") { [weak self] callback, error in
             Task { @MainActor in
@@ -91,6 +112,11 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
                     self.banner = problem == "exchange" ? "Tesla did not finish sign-in." : "Sign-in expired. Try again."
                     return
                 }
+                if let teslaCode = items.first(where: { $0.name == "tesla_code" })?.value {
+                    let state = items.first(where: { $0.name == "state" })?.value ?? ""
+                    await self.beginSession(path: "/auth/tesla/finish", body: ["code": teslaCode, "state": state])
+                    return
+                }
                 guard let code = items.first(where: { $0.name == "code" })?.value else {
                     self.banner = "The horn did not get a sign-in code."
                     return
@@ -98,17 +124,12 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
                 await self.exchange(code)
             }
         }
-        session.presentationContextProvider = self
+        session.presentationContextProvider = signInPresenter
         session.prefersEphemeralWebBrowserSession = true
         authSession = session
         if !session.start() {
             banner = "The sign-in window did not open."
         }
-    }
-
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        return scenes.flatMap(\.windows).first(where: \.isKeyWindow) ?? scenes.first?.windows.first ?? presenter
     }
 
     func exchange(_ code: String) async {
@@ -123,6 +144,12 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
         garage = nil
         trips = []
         alerts = []
+        carAlerts = []
+        carAlertProblem = ""
+        log = nil
+        chargers = ChargersPage(sites: [], problem: nil, note: nil)
+        service = ServicePage(facts: [], problem: nil, note: nil)
+        invites = InvitesPage(invites: [], problem: nil, note: nil, message: nil)
     }
 
     func refreshAll() async {
@@ -135,7 +162,12 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
     func loadGarage() async {
         do {
             garage = try await client.get("/api/garage")
-            banner = nil
+            if let note = garage?.snapshotNote, !note.isEmpty {
+                banner = note
+            } else {
+                banner = nil
+            }
+            PhoneTrail.shared.setDriveActive(garage?.vehicle?.inTrip == true || garage?.activeTrip != nil)
         } catch APIError.unauthorized {
             signOut()
         } catch {
@@ -158,6 +190,126 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
         do {
             let path = refresh ? "/api/drivers?refresh=1" : "/api/drivers"
             drivers = try await client.get(path)
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func loadLog() async {
+        do {
+            log = try await client.get("/api/log")
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func loadCarAlerts(refresh: Bool) async {
+        do {
+            let path = refresh ? "/api/tesla-alerts?refresh=1" : "/api/tesla-alerts"
+            let page: CarAlertsPage = try await client.get(path)
+            carAlerts = page.alerts
+            carAlertProblem = page.problem ?? ""
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func loadChargers(refresh: Bool) async {
+        do {
+            let path = refresh ? "/api/chargers?refresh=1" : "/api/chargers"
+            chargers = try await client.get(path)
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func loadService(refresh: Bool) async {
+        do {
+            let path = refresh ? "/api/service?refresh=1" : "/api/service"
+            service = try await client.get(path)
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func loadSoftware(refresh: Bool) async {
+        do {
+            let path = refresh ? "/api/software?refresh=1" : "/api/software"
+            let page: SoftwarePage = try await client.get(path)
+            if var current = log {
+                current.software = page.software
+                log = current
+            } else {
+                log = LogPage(charges: [], drains: [], battery: [], software: page.software, note: page.note ?? "")
+            }
+            if let problem = page.problem, !problem.isEmpty {
+                banner = problem
+            }
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func loadInvites(refresh: Bool) async {
+        do {
+            let path = refresh ? "/api/invites?refresh=1" : "/api/invites"
+            invites = try await client.get(path)
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func createInvite() async {
+        busy = true
+        defer { busy = false }
+        do {
+            let result: InvitesPage = try await client.post("/api/invites")
+            if let message = result.message, !message.isEmpty {
+                banner = message
+            }
+            await loadInvites(refresh: true)
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func revokeInvite(_ id: String) async {
+        busy = true
+        defer { busy = false }
+        do {
+            let escaped = id.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id
+            let result: CommandResult = try await client.post("/api/invites/\(escaped)/revoke")
+            banner = result.message
+            await loadInvites(refresh: true)
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func sendCommand(_ body: [String: Any]) async {
+        busy = true
+        defer { busy = false }
+        do {
+            let result: CommandResult = try await client.post("/api/command", json: body)
+            banner = result.message ?? "Tesla accepted it."
         } catch APIError.unauthorized {
             signOut()
         } catch {
@@ -199,6 +351,7 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
         do {
             let (status, payload) = try await client.data("/api/setup/telemetry", method: "POST", json: ["confirm": false])
             if status == 409 {
+                armedConfirm = nil
                 pending = .telemetry(client.serverMessage(payload) ?? "Sending the telemetry config is one signed command.")
                 return
             }
@@ -222,12 +375,34 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
         }
     }
 
+    func selectVehicle(_ vin: String) async {
+        guard garage?.vehicle?.vin != vin else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            garage = try await client.post("/api/vehicles/select", json: ["vin": vin])
+            banner = nil
+            await loadTrips()
+            await loadDrivers(refresh: false)
+        } catch APIError.unauthorized {
+            signOut()
+        } catch {
+            banner = error.localizedDescription
+        }
+    }
+
+    func grabReading() async {
+        let state = garage?.vehicle?.state.lowercased() ?? ""
+        await peek(confirm: state == "online")
+    }
+
     func peek(confirm: Bool) async {
         busy = true
         defer { busy = false }
         do {
-            let (status, payload) = try await client.data("/api/refresh", method: "POST", json: ["confirm": confirm, "loop": false])
+            let (status, payload) = try await client.data("/api/refresh", method: "POST", json: ["confirm": confirm, "loop": false], timeout: confirm ? 90 : 40)
             if status == 409 {
+                armedConfirm = nil
                 pending = .peek(client.serverMessage(payload) ?? "This peeks once.")
                 return
             }
@@ -236,7 +411,11 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
                 return
             }
             garage = try JSONDecoder().decode(Garage.self, from: payload)
-            banner = nil
+            if let note = garage?.snapshotNote, !note.isEmpty {
+                banner = note
+            } else {
+                banner = confirm ? "Got a reading." : nil
+            }
         } catch APIError.unauthorized {
             signOut()
         } catch {
@@ -333,6 +512,7 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
         guard let payload = json.data(using: .utf8), !json.isEmpty else { return }
         if name == "snapshot", let next = try? JSONDecoder().decode(Garage.self, from: payload) {
             garage = next
+            PhoneTrail.shared.setDriveActive(next.vehicle?.inTrip == true || next.activeTrip != nil)
             return
         }
         if name == "alert", let alert = try? JSONDecoder().decode(HonkAlert.self, from: payload) {
@@ -340,9 +520,28 @@ final class AppModel: ASWebAuthenticationPresentationContextProviding {
         }
     }
 
-    func confirmPending() async {
-        let choice = pending
+    /// The dialog binding clears `pending` as it dismisses, sometimes before the
+    /// button action runs. Keep the choice in `armedConfirm` so the poke still goes out.
+    func dismissConfirm() {
+        if let pending {
+            armedConfirm = pending
+        }
         pending = nil
+    }
+
+    func cancelConfirm() {
+        pending = nil
+        armedConfirm = nil
+    }
+
+    func takeConfirm() -> PendingConfirm? {
+        let choice = pending ?? armedConfirm
+        pending = nil
+        armedConfirm = nil
+        return choice
+    }
+
+    func confirm(_ choice: PendingConfirm?) async {
         switch choice {
         case .peek:
             await peek(confirm: true)
@@ -431,6 +630,14 @@ enum Keychain {
             kSecAttrService as String: service,
         ]
         SecItemDelete(query as CFDictionary)
+    }
+}
+
+final class TeslaSignInPresenter: NSObject, ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let windows = scenes.flatMap(\.windows)
+        return windows.first(where: \.isKeyWindow) ?? windows.first ?? ASPresentationAnchor()
     }
 }
 

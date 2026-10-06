@@ -1,35 +1,91 @@
 import MapKit
 import SwiftUI
 
+enum HonkTab: String, CaseIterable {
+    case garage, map, drives, log, drivers, alerts
+
+    var title: String {
+        switch self {
+        case .garage: return "Garage"
+        case .map: return "Map"
+        case .drives: return "Drives"
+        case .log: return "Log"
+        case .drivers: return "Drivers"
+        case .alerts: return "Alerts"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .garage: return "parkingsign"
+        case .map: return "map"
+        case .drives: return "road.lanes"
+        case .log: return "chart.bar"
+        case .drivers: return "person.2"
+        case .alerts: return "bell"
+        }
+    }
+}
+
+struct HonkTabBar: View {
+    @Binding var tab: HonkTab
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(HonkTab.allCases, id: \.self) { item in
+                Button {
+                    tab = item
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: item.symbol)
+                        Text(item.title).font(.caption2)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .foregroundStyle(tab == item ? Color(red: 0.72, green: 0.22, blue: 0.42) : .secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.top, 8)
+        .padding(.bottom, 2)
+        .background(.ultraThinMaterial)
+    }
+}
+
 struct RootView: View {
     @Bindable var model: AppModel
+    @State private var tab: HonkTab = .garage
 
     var body: some View {
         Group {
             if model.signedIn {
-                TabView {
-                    GarageScreen(model: model)
-                        .tabItem { Label("Garage", systemImage: "parkingsign") }
-                    MapScreen(model: model)
-                        .tabItem { Label("Map", systemImage: "map") }
-                    TripsScreen(model: model)
-                        .tabItem { Label("Trips", systemImage: "road.lanes") }
-                    DriversScreen(model: model)
-                        .tabItem { Label("Drivers", systemImage: "person.2") }
-                    AlertsScreen(model: model)
-                        .tabItem { Label("Alerts", systemImage: "bell") }
+                VStack(spacing: 0) {
+                    Group {
+                        switch tab {
+                        case .garage: GarageScreen(model: model)
+                        case .map: MapScreen(model: model)
+                        case .drives: TripsScreen(model: model)
+                        case .log: LogScreen(model: model)
+                        case .drivers: DriversScreen(model: model)
+                        case .alerts: AlertsScreen(model: model)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    HonkTabBar(tab: $tab)
                 }
-                .tint(Color(red: 0.72, green: 0.22, blue: 0.42))
             } else {
                 WelcomeScreen(model: model)
             }
         }
-        .confirmationDialog("One careful honk", isPresented: Binding(
+        .confirmationDialog("Poke it once?", isPresented: Binding(
             get: { model.pending != nil },
-            set: { if !$0 { model.pending = nil } }
+            set: { if !$0 { model.dismissConfirm() } }
         ), titleVisibility: .visible) {
-            Button("Do it once") { Task { await model.confirmPending() } }
-            Button("Leave it", role: .cancel) {}
+            Button("Poke it once") {
+                let choice = model.takeConfirm()
+                Task { await model.confirm(choice) }
+            }
+            Button("Leave it", role: .cancel) { model.cancelConfirm() }
         } message: {
             Text(model.pending?.message ?? "")
         }
@@ -53,31 +109,27 @@ struct WelcomeScreen: View {
                         PastelCard(tint: HonkColor.butter) { Text(banner) }
                     }
                     Button {
-                        Task { await model.startDemo() }
-                    } label: {
-                        Label("Look at the demo", systemImage: "theatermasks")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color(red: 0.72, green: 0.22, blue: 0.42))
-                    .disabled(model.busy)
-
-                    Button {
                         model.signIn()
                     } label: {
                         Label("Sign in with Tesla", systemImage: "key")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.72, green: 0.22, blue: 0.42))
                     .disabled(model.busy || model.health?.teslaConfigured == false)
 
                     PastelCard(tint: HonkColor.lilac) {
-                        Text("Sign in opens the server, then Tesla. The code comes back to \(model.health?.redirectUri ?? "the server's /path"). That only finishes when the Go server is the thing answering that URL.")
+                        Text("Sign in opens the Honk server on this Mac, then Tesla. Tesla sends the code back through \(model.health?.redirectUri ?? "the registered redirect"), and the Mac server trades it for a real session.")
                             .font(.footnote)
                     }
-                    if model.health?.teslaConfigured == false {
+                    if model.health == nil {
+                        PastelCard(tint: HonkColor.butter) {
+                            Text("Nothing is answering \(APIClient.configuredBase.absoluteString). Start the Honk server on this Mac, then come back.")
+                                .font(.footnote)
+                        }
+                    } else if model.health?.teslaConfigured == false {
                         PastelCard(tint: HonkColor.mint) {
-                            Text("This server has no Tesla client id yet. The demo still drives around the garage.")
+                            Text("This server has no Tesla client id yet.")
                                 .font(.footnote)
                         }
                     }
@@ -91,6 +143,7 @@ struct WelcomeScreen: View {
 struct GarageScreen: View {
     @Bindable var model: AppModel
     @State private var showSetup = false
+    @State private var showControls = false
 
     var body: some View {
         NavigationStack {
@@ -109,6 +162,7 @@ struct GarageScreen: View {
                                     .padding(.vertical, 4)
                                     .background(HonkColor.butter, in: Capsule())
                             }
+                            CarSwitcher(model: model)
                             HStack(spacing: 12) {
                                 HornMark()
                                 VStack(alignment: .leading) {
@@ -120,7 +174,39 @@ struct GarageScreen: View {
                                 }
                             }
                             SpeechBubble(text: garage.horn.line)
+                            if let note = garage.snapshotNote, !note.isEmpty {
+                                PastelCard(tint: HonkColor.butter) { Text(note).font(.footnote) }
+                            }
                             signalGrid(garage.vehicle)
+                            if let facts = garage.vehicle?.facts, !facts.isEmpty {
+                                PastelCard(tint: HonkColor.lilac) {
+                                    Text("On the car").font(.headline)
+                                    ForEach(facts) { fact in
+                                        HStack(alignment: .firstTextBaseline) {
+                                            Text(fact.label).font(.footnote.weight(.semibold))
+                                            Spacer()
+                                            Text(fact.value).font(.footnote).multilineTextAlignment(.trailing)
+                                        }
+                                    }
+                                }
+                            }
+                            Button {
+                                showControls = true
+                            } label: {
+                                Label("Controls", systemImage: "slider.horizontal.3")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            Button {
+                                Task { await model.grabReading() }
+                            } label: {
+                                Label(grabTitle(garage.vehicle), systemImage: "arrow.down.doc")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color(red: 0.72, green: 0.22, blue: 0.42))
+                            .disabled(model.busy)
+                            ReadingHistory(grabs: garage.grabs)
                             if let note = garage.vehicle?.activeDriverNote {
                                 PastelCard(tint: HonkColor.lilac) {
                                     Text(note).font(.footnote)
@@ -158,6 +244,17 @@ struct GarageScreen: View {
             .sheet(isPresented: $showSetup) {
                 SetupScreen(model: model)
             }
+            .sheet(isPresented: $showControls) {
+                ControlsScreen(model: model)
+            }
+        }
+    }
+
+    private func grabTitle(_ car: VehicleView?) -> String {
+        switch car?.state.lowercased() {
+        case "asleep", "offline": return "Wake and grab"
+        case "online": return "Grab a new reading"
+        default: return "Check this car"
         }
     }
 
@@ -195,13 +292,69 @@ struct GarageScreen: View {
     }
 }
 
+struct CarSwitcher: View {
+    var model: AppModel
+
+    var body: some View {
+        if let cars = model.garage?.vehicles, cars.count > 1 {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(cars) { car in
+                        Button {
+                            Task { await model.selectVehicle(car.vin) }
+                        } label: {
+                            Text(carChip(car))
+                                .font(.subheadline.weight(car.selected ? .bold : .regular))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(car.selected ? HonkColor.blush : Color.white.opacity(0.8), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(model.busy)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private func carChip(_ car: VehicleBrief) -> String {
+    var parts = [car.name, car.state]
+    if let access = car.access, !access.isEmpty {
+        parts.append(access.lowercased())
+    }
+    return parts.joined(separator: " · ")
+}
+
+struct ReadingHistory: View {
+    var grabs: [Grab]
+
+    var body: some View {
+        PastelCard(tint: HonkColor.butter) {
+            Text("Readings").font(.headline)
+            if grabs.isEmpty {
+                Text("No readings yet. Grab one while the car is online. Parked cars still have battery, lock, tires, sentry, and charge limit.")
+                    .font(.footnote)
+            }
+            ForEach(grabs) { grab in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(grab.summary).font(.subheadline.weight(.semibold))
+                    Text("\(grab.state) · \(HonkFormat.when(grab.takenAt))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
 struct MapScreen: View {
     var model: AppModel
     @State private var position: MapCameraPosition = .automatic
 
     var body: some View {
         NavigationStack {
-            ZStack {
+            ZStack(alignment: .top) {
                 HonkBackground()
                 if let car = model.garage?.vehicle, let lat = car.latitude, let lng = car.longitude {
                     let coordinate = CLLocationCoordinate2D(latitude: lat, longitude: lng)
@@ -230,102 +383,19 @@ struct MapScreen: View {
                     }
                     .padding()
                 }
+                CarSwitcher(model: model)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 8)
             }
             .navigationTitle("Map")
         }
     }
 }
 
-struct TripsScreen: View {
-    var model: AppModel
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                HonkBackground()
-                if model.trips.isEmpty {
-                    Text("No trips yet. The horn starts one when the car leaves Park.")
-                        .padding()
-                } else {
-                    List(model.trips) { trip in
-                        NavigationLink {
-                            TripDetail(trip: trip)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("\(HonkFormat.when(trip.startedAt))")
-                                    .font(.headline)
-                                Text("\(HonkFormat.miles(trip.distanceMiles)) · max \(HonkFormat.mph(trip.maxSpeedMph))")
-                                    .font(.subheadline)
-                                if trip.overLimit {
-                                    Text(trip.callout ?? "Over the limit.")
-                                        .font(.footnote)
-                                        .foregroundStyle(Color(red: 0.72, green: 0.22, blue: 0.42))
-                                }
-                                if trip.pendingClose {
-                                    Text("Parked, waiting two minutes to close the trip.")
-                                        .font(.caption)
-                                }
-                            }
-                            .padding(.vertical, 4)
-                        }
-                        .listRowBackground(trip.overLimit ? HonkColor.blush : HonkColor.butter.opacity(0.7))
-                    }
-                    .scrollContentBackground(.hidden)
-                }
-            }
-            .navigationTitle("Trips")
-            .task { await model.loadTrips() }
-        }
-    }
-}
-
-struct TripDetail: View {
-    var trip: Trip
-
-    var body: some View {
-        ZStack {
-            HonkBackground()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if let callout = trip.callout, !callout.isEmpty {
-                        SpeechBubble(text: callout)
-                    }
-                    PastelCard(tint: HonkColor.mint) {
-                        Text("Max \(HonkFormat.mph(trip.maxSpeedMph))").font(.title3.weight(.bold))
-                        Text("Distance \(HonkFormat.miles(trip.distanceMiles))")
-                        Text("Limit \(HonkFormat.mph(trip.speedLimitMph))")
-                        Text(trip.endedAt == nil ? "Still out" : "Ended \(HonkFormat.when(trip.endedAt))")
-                            .font(.footnote)
-                        if trip.guestMode == true {
-                            Text("Guest mode was on. The horn is not naming the driver.")
-                                .font(.footnote)
-                        } else if trip.seatOccupied == true {
-                            Text("The driver seat was occupied. That is not a name.")
-                                .font(.footnote)
-                        }
-                    }
-                    if trip.polyline.count > 1 {
-                        Map {
-                            MapPolyline(coordinates: trip.polyline.map {
-                                CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
-                            })
-                            .stroke(Color(red: 0.72, green: 0.22, blue: 0.42), lineWidth: 4)
-                        }
-                        .mapStyle(.standard)
-                        .frame(height: 280)
-                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    }
-                }
-                .padding(18)
-            }
-        }
-        .navigationTitle("Trip")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
 struct DriversScreen: View {
     var model: AppModel
+    @State private var confirmCreate = false
+    @State private var revoke: Invite?
 
     var body: some View {
         NavigationStack {
@@ -342,6 +412,35 @@ struct DriversScreen: View {
                             Text(model.drivers.problem)
                         }
                         .listRowBackground(HonkColor.butter)
+                    }
+                    Section("Invites") {
+                        if let problem = model.invites.problem, !problem.isEmpty {
+                            Text(problem).font(.footnote)
+                        }
+                        if let note = model.invites.note, !note.isEmpty {
+                            Text(note).font(.footnote)
+                        }
+                        if model.invites.invites.isEmpty {
+                            Text("No invite links.")
+                        }
+                        ForEach(model.invites.invites) { invite in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(invite.state?.isEmpty == false ? invite.state! : "Invite")
+                                    .font(.headline)
+                                if let link = invite.link, !link.isEmpty {
+                                    Text(link).font(.caption).textSelection(.enabled)
+                                }
+                                if let expires = invite.expiresAt, !expires.isEmpty {
+                                    Text(expires).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Button("Revoke") { revoke = invite }
+                                    .disabled(model.busy)
+                            }
+                        }
+                        if model.invites.problem?.contains("not the owner") != true {
+                            Button("Create a one-day invite") { confirmCreate = true }
+                                .disabled(model.busy)
+                        }
                     }
                     Section("Allow-list") {
                         if model.drivers.drivers.isEmpty {
@@ -360,11 +459,36 @@ struct DriversScreen: View {
                 }
                 .scrollContentBackground(.hidden)
             }
+            .safeAreaInset(edge: .top) {
+                CarSwitcher(model: model).padding(.horizontal, 18).padding(.bottom, 6)
+            }
             .navigationTitle("Drivers")
             .toolbar {
-                Button("Refresh") { Task { await model.loadDrivers(refresh: true) } }
+                Button("Refresh") {
+                    Task {
+                        await model.loadDrivers(refresh: true)
+                        await model.loadInvites(refresh: true)
+                    }
+                }
             }
-            .task { await model.loadDrivers(refresh: false) }
+            .task {
+                await model.loadDrivers(refresh: false)
+                await model.loadInvites(refresh: false)
+            }
+            .confirmationDialog("Create a one-day invite?", isPresented: $confirmCreate, titleVisibility: .visible) {
+                Button("Create the invite") { Task { await model.createInvite() } }
+                Button("Leave it", role: .cancel) {}
+            } message: {
+                Text("Anyone who opens the link can use this car in the Tesla app. The link expires in a day.")
+            }
+            .confirmationDialog("Revoke this invite?", isPresented: Binding(get: { revoke != nil }, set: { if !$0 { revoke = nil } }), titleVisibility: .visible) {
+                Button("Revoke", role: .destructive) {
+                    let invite = revoke
+                    revoke = nil
+                    if let invite { Task { await model.revokeInvite(invite.id) } }
+                }
+                Button("Leave it", role: .cancel) { revoke = nil }
+            }
         }
     }
 }
@@ -378,6 +502,28 @@ struct AlertsScreen: View {
             ZStack {
                 HonkBackground()
                 Form {
+                    Section("From the car") {
+                        if !model.carAlertProblem.isEmpty {
+                            Text(model.carAlertProblem).font(.footnote)
+                        }
+                        if model.carAlerts.isEmpty {
+                            Text("Tesla's recent alerts show up here after you ask once. Honk keeps the ones it has seen.")
+                                .font(.footnote)
+                        }
+                        ForEach(model.carAlerts) { alert in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(alert.name).font(.headline)
+                                if let detail = alert.detail, !detail.isEmpty {
+                                    Text(detail).font(.subheadline)
+                                }
+                                Text(HonkFormat.when(alert.at))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Button("Ask Tesla once") { Task { await model.loadCarAlerts(refresh: true) } }
+                            .disabled(model.busy)
+                    }
                     Section("The horn noticed") {
                         if model.alerts.isEmpty {
                             Text("Quiet so far.")
@@ -434,6 +580,7 @@ struct AlertsScreen: View {
             .navigationTitle("Alerts")
             .task {
                 await model.loadAlerts()
+                await model.loadCarAlerts(refresh: false)
                 draft = model.settings
             }
             .onChange(of: model.settings?.speedLimitMph) { _, _ in

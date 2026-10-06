@@ -16,9 +16,10 @@ import (
 )
 
 type Vehicle struct {
-	VIN   string
-	Name  string
-	State string
+	VIN    string
+	Name   string
+	State  string
+	Access string
 }
 
 type StatusError struct {
@@ -106,7 +107,7 @@ func (c *Client) Drivers(ctx context.Context, vin string) (int, []model.Driver, 
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusUnauthorized {
-		return res.StatusCode, nil, "Tesla only returns the driver list to the vehicle owner, and only when vehicle_device_data is granted.", nil
+		return res.StatusCode, nil, "Tesla refused the driver list for this car. Sign-in already includes vehicle_device_data. Tesla only gives that list to the owner of this specific car.", nil
 	}
 	if res.StatusCode >= 300 {
 		return res.StatusCode, nil, fmt.Sprintf("Tesla returned %d for the driver list.", res.StatusCode), nil
@@ -114,22 +115,23 @@ func (c *Client) Drivers(ctx context.Context, vin string) (int, []model.Driver, 
 	return res.StatusCode, ParseDrivers(body), "", nil
 }
 
-func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {
+// Do performs one Fleet API call and returns the status and body, including Tesla's error body.
+func (c *Client) Do(ctx context.Context, method, path string, in any) (int, []byte, error) {
 	token, err := c.Token(ctx)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
-			return err
+			return 0, nil, err
 		}
 		body = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base()+path, body)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	if in != nil {
@@ -137,12 +139,20 @@ func (c *Client) do(ctx context.Context, method, path string, in any, out any) e
 	}
 	res, err := c.http().Do(req)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer res.Body.Close()
 	buf, _ := io.ReadAll(io.LimitReader(res.Body, 2<<20))
-	if res.StatusCode >= 300 {
-		return &StatusError{Status: res.StatusCode, Body: trim(buf), Path: path}
+	return res.StatusCode, buf, nil
+}
+
+func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {
+	status, buf, err := c.Do(ctx, method, path, in)
+	if err != nil {
+		return err
+	}
+	if status >= 300 {
+		return &StatusError{Status: status, Body: trim(buf), Path: path}
 	}
 	if out == nil || len(buf) == 0 {
 		return nil

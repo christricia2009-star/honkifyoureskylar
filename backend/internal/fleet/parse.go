@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -56,7 +57,8 @@ func mapVehicle(m map[string]any) (Vehicle, bool) {
 	if state == "" {
 		state = "offline"
 	}
-	return Vehicle{VIN: vin, Name: name, State: state}, true
+	access, _ := m["access_type"].(string)
+	return Vehicle{VIN: vin, Name: name, State: state, Access: access}, true
 }
 
 // ParseVehicleData reads one vehicle_data payload.
@@ -104,6 +106,24 @@ func ParseVehicleData(vin string, raw map[string]any) (telemetry.Update, Vehicle
 		if s, ok := charge["charging_state"].(string); ok && s != "" {
 			up.Charge = &s
 		}
+		if _, present := charge["charge_energy_added"]; present {
+			n := number(charge["charge_energy_added"])
+			up.EnergyAddedKwh = &n
+		}
+		if _, present := charge["energy_remaining"]; present {
+			n := number(charge["energy_remaining"])
+			up.EnergyRemainingKwh = &n
+		}
+		if _, present := charge["battery_range"]; present {
+			n := number(charge["battery_range"])
+			up.RatedRangeMi = &n
+		}
+		if b, ok := charge["fast_charger_present"].(bool); ok {
+			up.Fast = &b
+		}
+		if s, ok := charge["fast_charger_type"].(string); ok {
+			up.FastType = s
+		}
 	}
 	if vs, ok := resp["vehicle_state"].(map[string]any); ok {
 		if b, ok := vs["locked"].(bool); ok {
@@ -119,8 +139,166 @@ func ParseVehicleData(vin string, raw map[string]any) (telemetry.Update, Vehicle
 		if name, ok := vs["vehicle_name"].(string); ok && name != "" {
 			vehicle.Name = name
 		}
+		if g, ok := vs["guest_mode"].(bool); ok {
+			up.Guest = &g
+		}
+		if ver := softwareVersion(vs); ver != "" {
+			up.Software = ver
+		}
 	}
+	up.Facts = readingFacts(resp)
 	return up, vehicle
+}
+
+func readingFacts(resp map[string]any) []model.Fact {
+	var facts []model.Fact
+	add := func(label, value string) {
+		if strings.TrimSpace(value) != "" {
+			facts = append(facts, model.Fact{Label: label, Value: value})
+		}
+	}
+	vs, _ := resp["vehicle_state"].(map[string]any)
+	charge, _ := resp["charge_state"].(map[string]any)
+	climate, _ := resp["climate_state"].(map[string]any)
+	drive, _ := resp["drive_state"].(map[string]any)
+	if vs != nil {
+		add("Software", softwareVersion(vs))
+		if _, ok := vs["odometer"]; ok {
+			add("Odometer", fmt.Sprintf("%.0f mi", number(vs["odometer"])))
+		}
+		if b, ok := vs["sentry_mode"].(bool); ok {
+			add("Sentry", onOff(b))
+		}
+		if b, ok := vs["valet_mode"].(bool); ok {
+			add("Valet", onOff(b))
+		}
+		if mode, ok := vs["speed_limit_mode"].(map[string]any); ok {
+			if active, ok := mode["active"].(bool); ok {
+				if active {
+					add("Speed limit mode", fmt.Sprintf("On, %.0f mph", number(mode["current_limit_mph"])))
+				} else {
+					add("Speed limit mode", "Off")
+				}
+			}
+		}
+		if b, ok := vs["guest_mode"].(bool); ok {
+			add("Guest mode", onOff(b))
+		}
+		add("Tires", tireLine(vs))
+		add("Windows", windowLine(vs))
+	}
+	if charge != nil {
+		if s, ok := charge["charging_state"].(string); ok {
+			add("Charging", s)
+		}
+		if _, ok := charge["charge_limit_soc"]; ok {
+			add("Charge limit", fmt.Sprintf("%.0f%%", number(charge["charge_limit_soc"])))
+		}
+		if _, ok := charge["charger_power"]; ok && number(charge["charger_power"]) > 0 {
+			add("Charger", fmt.Sprintf("%.0f kW", number(charge["charger_power"])))
+		}
+		if _, ok := charge["minutes_to_full_charge"]; ok && number(charge["minutes_to_full_charge"]) > 0 {
+			add("Time to full", fmt.Sprintf("%.0f min", number(charge["minutes_to_full_charge"])))
+		}
+	}
+	if climate != nil {
+		if _, ok := climate["inside_temp"]; ok {
+			add("Cabin", fahrenheit(number(climate["inside_temp"])))
+		}
+		if _, ok := climate["outside_temp"]; ok {
+			add("Outside", fahrenheit(number(climate["outside_temp"])))
+		}
+		if b, ok := climate["is_climate_on"].(bool); ok {
+			add("Climate", onOff(b))
+		}
+	}
+	if drive != nil {
+		if _, ok := drive["heading"]; ok {
+			add("Heading", fmt.Sprintf("%.0f°", number(drive["heading"])))
+		}
+		if _, ok := drive["power"]; ok {
+			add("Power", fmt.Sprintf("%.0f kW", number(drive["power"])))
+		}
+	}
+	return facts
+}
+
+func softwareVersion(vs map[string]any) string {
+	if su, ok := vs["software_update"].(map[string]any); ok {
+		if ver, ok := su["version"].(string); ok && ver != "" {
+			return ver
+		}
+	}
+	if ver, ok := vs["car_version"].(string); ok {
+		return ver
+	}
+	return ""
+}
+
+func tireLine(vs map[string]any) string {
+	order := []struct {
+		key, label string
+	}{
+		{"tpms_pressure_fl", "FL"},
+		{"tpms_pressure_fr", "FR"},
+		{"tpms_pressure_rl", "RL"},
+		{"tpms_pressure_rr", "RR"},
+	}
+	var parts []string
+	for _, item := range order {
+		if _, ok := vs[item.key]; !ok {
+			continue
+		}
+		psi := number(vs[item.key])
+		if psi > 0 && psi < 10 {
+			psi *= 14.5038
+		}
+		if psi <= 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %.0f", item.label, psi))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func windowLine(vs map[string]any) string {
+	order := []struct {
+		key, label string
+	}{
+		{"fd_window", "driver front"},
+		{"fp_window", "passenger front"},
+		{"rd_window", "driver rear"},
+		{"rp_window", "passenger rear"},
+	}
+	var open []string
+	seen := false
+	for _, item := range order {
+		if _, ok := vs[item.key]; !ok {
+			continue
+		}
+		seen = true
+		if number(vs[item.key]) != 0 {
+			open = append(open, item.label)
+		}
+	}
+	if !seen {
+		return ""
+	}
+	if len(open) == 0 {
+		return "Closed"
+	}
+	return "Open: " + strings.Join(open, ", ")
+}
+
+func fahrenheit(celsius float64) string {
+	return fmt.Sprintf("%.0f°F", celsius*9/5+32)
+}
+
+func onOff(v bool) string {
+	if v {
+		return "On"
+	}
+	return "Off"
 }
 
 func doorsFromVehicleState(vs map[string]any) (bool, string) {
@@ -178,9 +356,15 @@ func ParseDrivers(body []byte) []model.Driver {
 				name = "Unnamed driver"
 			}
 		}
+		detail := "Allowed on this car. This is not the person in the seat."
+		if ga, ok := m["granular_access"].(map[string]any); ok {
+			if hide, _ := ga["hide_private"].(bool); hide {
+				detail = "Allowed on this car. Tesla hides private data, including location, from this share. This is not the person in the seat."
+			}
+		}
 		out = append(out, model.Driver{
 			Name:   name,
-			Detail: "Allowed driver from Tesla. This is not the person in the seat.",
+			Detail: detail,
 		})
 	}
 	return out

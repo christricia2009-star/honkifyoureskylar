@@ -38,6 +38,7 @@ type FleetAPI interface {
 	Wake(ctx context.Context, vin string) (fleet.Vehicle, error)
 	Data(ctx context.Context, vin string) (telemetry.Update, fleet.Vehicle, error)
 	Drivers(ctx context.Context, vin string) (int, []model.Driver, string, error)
+	Do(ctx context.Context, method, path string, body any) (int, []byte, error)
 }
 
 type Server struct {
@@ -53,6 +54,7 @@ type Server struct {
 
 	authMu sync.Mutex
 	hub    *hub
+	primed sync.Map
 }
 
 func New(cfg config.Config, db *store.Store, svc *live.Service) *Server {
@@ -75,14 +77,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/tesla/start", s.oauthStart)
 	mux.HandleFunc("GET /auth/tesla/callback", s.oauthCallback)
 	mux.HandleFunc("GET /path", s.oauthCallback)
+	mux.HandleFunc("POST /auth/tesla/finish", s.oauthAppFinish)
 	mux.HandleFunc("POST /auth/exchange", s.exchange)
 	mux.HandleFunc("POST /api/session/demo", s.demoSession)
 	mux.HandleFunc("GET /api/garage", s.garage)
+	mux.HandleFunc("POST /api/vehicles/select", s.selectVehicle)
 	mux.HandleFunc("GET /api/trips", s.tripList)
 	mux.HandleFunc("GET /api/trips/{id}", s.tripDetail)
 	mux.HandleFunc("GET /api/drivers", s.drivers)
 	mux.HandleFunc("GET /api/alerts", s.alerts)
 	mux.HandleFunc("POST /api/alerts/{id}/read", s.readAlert)
+	mux.HandleFunc("GET /api/log", s.carLog)
+	mux.HandleFunc("GET /api/tesla-alerts", s.teslaAlerts)
+	mux.HandleFunc("GET /api/software", s.softwareNotes)
+	mux.HandleFunc("GET /api/chargers", s.chargers)
+	mux.HandleFunc("GET /api/service", s.serviceStatus)
+	mux.HandleFunc("GET /api/invites", s.invites)
+	mux.HandleFunc("POST /api/invites", s.createInvite)
+	mux.HandleFunc("POST /api/invites/{id}/revoke", s.revokeInvite)
+	mux.HandleFunc("POST /api/command", s.command)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("GET /api/usage", s.usage)
@@ -143,23 +156,10 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "honkifyoureskylar://auth?error=state", http.StatusFound)
 		return
 	}
-	tok, err := oauth.Exchange(r.Context(), s.Cfg, code)
+	sess, err := s.finishTeslaCode(r.Context(), code)
 	if err != nil {
 		slog.Error("tesla code exchange failed", "err", err.Error())
 		http.Redirect(w, r, "honkifyoureskylar://auth?error=exchange", http.StatusFound)
-		return
-	}
-	if err := s.DB.SaveTeslaAuth(model.TeslaAuth{
-		AccessToken: tok.Access, RefreshToken: tok.Refresh, Expiry: tok.Expiry,
-		Scopes: oauth.Scopes, FleetBase: s.Cfg.FleetAPIBase,
-	}); err != nil {
-		http.Error(w, "could not store the Tesla session", http.StatusInternalServerError)
-		return
-	}
-	s.syncVehicles(r.Context())
-	_, sess, err := s.DB.CreateSession(false, 90*24*time.Hour)
-	if err != nil {
-		http.Error(w, "could not start an app session", http.StatusInternalServerError)
 		return
 	}
 	handoff, err := s.DB.SaveHandoff(sess.ID)
@@ -168,6 +168,49 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "honkifyoureskylar://auth?code="+handoff, http.StatusFound)
+}
+
+func (s *Server) finishTeslaCode(ctx context.Context, code string) (store.Session, error) {
+	tok, err := oauth.Exchange(ctx, s.Cfg, code)
+	if err != nil {
+		return store.Session{}, err
+	}
+	if err := s.DB.SaveTeslaAuth(model.TeslaAuth{
+		AccessToken: tok.Access, RefreshToken: tok.Refresh, Expiry: tok.Expiry,
+		Scopes: oauth.Scopes, FleetBase: s.Cfg.FleetAPIBase,
+	}); err != nil {
+		return store.Session{}, err
+	}
+	s.syncVehicles(ctx)
+	_, sess, err := s.DB.CreateSession(false, 90*24*time.Hour)
+	return sess, err
+}
+
+func (s *Server) oauthAppFinish(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Code  string `json:"code"`
+		State string `json:"state"`
+	}
+	if err := readJSON(r, &body); err != nil || body.Code == "" || body.State == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing_code", "message": "The horn did not get a sign-in code."})
+		return
+	}
+	if err := s.DB.ConsumeOAuthState(body.State); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "state", "message": "Sign-in expired. Try again."})
+		return
+	}
+	sess, err := s.finishTeslaCode(r.Context(), body.Code)
+	if err != nil {
+		slog.Error("tesla code exchange failed", "err", err.Error())
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "exchange", "message": "Tesla did not finish sign-in."})
+		return
+	}
+	raw, err := s.DB.IssueTokenForSession(sess)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "session", "message": "Could not start an app session."})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session": raw, "demo": false})
 }
 
 func (s *Server) exchange(w http.ResponseWriter, r *http.Request) {
@@ -205,12 +248,44 @@ func (s *Server) garage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	g, err := s.buildGarage(sess.Demo)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "garage"})
+	if !sess.Demo {
+		s.rememberAccess(r.Context())
+	}
+	if v, err := s.focus(sess.Demo); err == nil {
+		s.maybePrime(r.Context(), sess.Demo, v)
+	}
+	s.writeGarage(w, sess.Demo)
+}
+
+func (s *Server) selectVehicle(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.require(w, r)
+	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, g)
+	var body struct {
+		VIN string `json:"vin"`
+	}
+	if err := readJSON(r, &body); err != nil || body.VIN == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "vin"})
+		return
+	}
+	v, err := s.DB.Vehicle(body.VIN)
+	if err != nil || v.Demo != sess.Demo {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no_car"})
+		return
+	}
+	settings, err := s.DB.EnsureSettings()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "settings"})
+		return
+	}
+	settings.SelectedVIN = v.VIN
+	if err := s.DB.SaveSettings(settings); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "settings"})
+		return
+	}
+	s.maybePrime(r.Context(), sess.Demo, v)
+	s.writeGarage(w, sess.Demo)
 }
 
 func (s *Server) tripList(w http.ResponseWriter, r *http.Request) {
@@ -260,13 +335,26 @@ func (s *Server) drivers(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"drivers": []model.Driver{}, "problem": "No car yet.", "note": note})
 		return
 	}
+	if !sess.Demo {
+		s.rememberAccess(r.Context())
+		if fresh, ferr := s.DB.Vehicle(v.VIN); ferr == nil {
+			v = fresh
+		}
+	}
+	if msg, blocked := driverShareProblem(v.Access); blocked {
+		_ = s.DB.SaveDrivers(v.VIN, sess.Demo, nil, msg)
+		writeJSON(w, http.StatusOK, map[string]any{"drivers": []model.Driver{}, "problem": msg, "note": note})
+		return
+	}
 	cached, problem, when, err := s.DB.Drivers(v.VIN)
+	problem = ownerDriverProblem(problem)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "drivers"})
 		return
 	}
 	refresh := r.URL.Query().Get("refresh") == "1"
-	if sess.Demo || (s.Fleet == nil) || (!refresh && !when.IsZero() && time.Since(when) < 10*time.Minute) {
+	staleRefusal := strings.Contains(problem, "refused the driver list")
+	if sess.Demo || (s.Fleet == nil) || (!refresh && !staleRefusal && !when.IsZero() && time.Since(when) < 10*time.Minute) {
 		writeJSON(w, http.StatusOK, map[string]any{"drivers": emptyDrivers(cached), "problem": problem, "note": note})
 		return
 	}
@@ -277,6 +365,7 @@ func (s *Server) drivers(w http.ResponseWriter, r *http.Request) {
 	if callErr != nil {
 		problem = "The horn could not reach Tesla for the driver list."
 	}
+	problem = ownerDriverProblem(problem)
 	if err := s.DB.SaveDrivers(v.VIN, false, drivers, problem); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "drivers"})
 		return
@@ -387,8 +476,8 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 			"detail": "Create the app at developer.tesla.com, then call the partner register endpoint. Credentials stay in the server environment."},
 		{"id": "domain_key", "title": "Domain key", "done": keyOK,
 			"detail": "The public key must answer at https://" + s.Cfg.Domain + "/.well-known/appspecific/com.tesla.3p.public-key.pem. The private key stays on the server."},
-		{"id": "virtual_key", "title": "Virtual key paired", "done": s.DB.Acked("virtual_key"),
-			"detail": "In the Tesla app, add https://www.tesla.com/_ak/" + s.Cfg.Domain + " before live data and commands will work."},
+		{"id": "virtual_key", "title": "Car key for streaming", "done": s.DB.Acked("virtual_key"),
+			"detail": "Sign-in already lets Honk read a car that is awake. The link https://www.tesla.com/_ak/" + s.Cfg.Domain + " is a key you add inside the Tesla app so the car will stream on its own and accept commands. A snapshot does not need that key."},
 		{"id": "billing", "title": "Payment method and billing cap", "done": s.DB.Acked("billing"),
 			"detail": "In the Tesla developer portal, add a card and set a billing limit. A limit of $0 disables the API. The $10 monthly credit is the working assumption. Honk does not poll vehicle_data on a timer."},
 	}
@@ -448,8 +537,8 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Confirm bool `json:"confirm"`
-		Loop    bool `json:"loop"`
+		Confirm bool   `json:"confirm"`
+		Loop    bool   `json:"loop"`
 		VIN     string `json:"vin"`
 	}
 	_ = readJSON(r, &body)
@@ -472,7 +561,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no_car"})
 		return
 	}
-	willWake := strings.EqualFold(v.State, "asleep")
+	willWake := canWake(v.State)
 	if !body.Confirm {
 		est := billing.USDPerVehicleData
 		if willWake {
@@ -480,7 +569,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":          "confirm_required",
-			"message":        warnText(willWake),
+			"message":        warnText(v.State),
 			"willWake":       willWake,
 			"estimatedUsd":   est,
 			"vehicleDataUsd": billing.USDPerVehicleData,
@@ -513,9 +602,12 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	state := got.State
 	seen := time.Now()
-	_ = s.DB.UpsertVehicle(model.Vehicle{VIN: got.VIN, Demo: false, Name: got.Name, State: state, LastSeen: &seen})
-	if strings.EqualFold(state, "asleep") {
+	_ = s.DB.UpsertVehicle(model.Vehicle{VIN: got.VIN, Demo: false, Name: got.Name, State: state, Access: got.Access, LastSeen: &seen})
+	triedWake := false
+	if canWake(state) {
+		slog.Info("confirmed peek", "car", vinSuffix(v.VIN), "state", state)
 		woke, werr := s.Fleet.Wake(r.Context(), v.VIN)
+		triedWake = true
 		if werr == nil || billable(werr) {
 			_ = s.DB.AddUsage(false, "wake", 1)
 		}
@@ -524,7 +616,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		state = woke.State
-		for i := 0; i < 6 && !strings.EqualFold(state, "online"); i++ {
+		for i := 0; i < 8 && !strings.EqualFold(state, "online"); i++ {
 			select {
 			case <-r.Context().Done():
 				return
@@ -539,9 +631,15 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 			}
 			state = again.State
 		}
+		slog.Info("wake result", "car", vinSuffix(v.VIN), "state", state)
 	}
 	if !strings.EqualFold(state, "online") {
 		_ = s.DB.TouchVehicle(v.VIN, state, time.Now())
+		note := "This car is " + state + ". Honk reads a car that is already online. It wakes a car only when Tesla says asleep or offline, and only after you confirm."
+		if triedWake {
+			note = "Tesla still lists this car as " + state + ". Honk tried one wake and stopped. It will not keep poking."
+		}
+		_ = s.DB.SetMeta("read:"+v.VIN, note)
 		s.writeGarage(w, false)
 		return
 	}
@@ -553,12 +651,8 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "vehicle_data", "message": derr.Error()})
 		return
 	}
-	if veh.Name != "" {
-		now := time.Now()
-		_ = s.DB.UpsertVehicle(model.Vehicle{VIN: v.VIN, Demo: false, Name: veh.Name, State: "online", LastSeen: &now})
-	}
-	if _, err := s.Live.Apply(false, up); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "apply"})
+	if err := s.absorbReading(v.VIN, up, veh); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "apply", "message": "Honk read the car but could not store it."})
 		return
 	}
 	s.writeGarage(w, false)
@@ -769,9 +863,19 @@ func (s *Server) buildGarage(demoMode bool) (model.Garage, error) {
 	}
 	g := model.Garage{
 		Demo: demoMode, Linked: s.DB.Linked(), Usage: usage, ServerTime: model.APITime(time.Now()),
-		Horn: model.Horn{Mood: "napping", Line: "No car is parked in the garage yet."},
+		Horn:     model.Horn{Mood: "napping", Line: "No car is parked in the garage yet."},
+		Vehicles: []model.VehicleBrief{}, Grabs: []model.Grab{},
+	}
+	cars, err := s.DB.Vehicles(demoMode)
+	if err != nil {
+		return model.Garage{}, err
 	}
 	v, err := s.focus(demoMode)
+	for _, car := range cars {
+		g.Vehicles = append(g.Vehicles, model.VehicleBrief{
+			VIN: car.VIN, Name: car.Name, State: car.State, Access: car.Access, Selected: err == nil && car.VIN == v.VIN,
+		})
+	}
 	if err != nil {
 		return g, nil
 	}
@@ -779,12 +883,19 @@ func (s *Server) buildGarage(demoMode bool) (model.Garage, error) {
 	if snapErr != nil && !errors.Is(snapErr, sql.ErrNoRows) {
 		return model.Garage{}, snapErr
 	}
+	facts := []model.Fact{}
+	if sn.Detail != "" {
+		_ = json.Unmarshal([]byte(sn.Detail), &facts)
+	}
+	if facts == nil {
+		facts = []model.Fact{}
+	}
 	view := model.VehicleView{
 		VIN: v.VIN, Name: v.Name, State: v.State, SpeedMph: sn.SpeedMph, Gear: sn.Gear,
 		GearLabel: trips.GearLabel(sn.Gear), Latitude: sn.Lat, Longitude: sn.Lng, Soc: sn.Soc,
 		EstRangeMiles: sn.RangeMi, ChargeState: or(sn.ChargeState, "Unknown"), DoorsOpen: sn.DoorsOpen,
 		DoorSummary: or(sn.DoorSummary, "Unknown"), Locked: sn.Locked, DriverSeatOccupied: sn.Seat,
-		GuestMode: sn.Guest, ActiveDriverNote: model.ActiveDriverNote,
+		GuestMode: sn.Guest, ActiveDriverNote: model.ActiveDriverNote, Facts: facts,
 	}
 	if v.LastSeen != nil {
 		t := model.APITime(*v.LastSeen)
@@ -805,7 +916,168 @@ func (s *Server) buildGarage(demoMode bool) (model.Garage, error) {
 		limit = 75
 	}
 	g.Horn = horn.Line(v.State, sn.SpeedMph, limit, sn.Seat, sn.Guest, view.InTrip, v.LastSeen, time.Now())
+	grabs, err := s.DB.Grabs(v.VIN, 20)
+	if err != nil {
+		return model.Garage{}, err
+	}
+	if grabs == nil {
+		grabs = []model.Grab{}
+	}
+	g.Grabs = grabs
+	if note, _ := s.DB.Meta("read:" + v.VIN); note != "" {
+		g.SnapshotNote = note
+	}
 	return g, nil
+}
+
+func (s *Server) PrimeAwake(ctx context.Context) {
+	if s.Fleet == nil || !s.DB.Linked() {
+		return
+	}
+	cars, err := s.DB.Vehicles(false)
+	if err != nil {
+		slog.Error("prime cars", "err", err.Error())
+		return
+	}
+	for _, car := range cars {
+		s.maybePrime(ctx, false, car)
+	}
+}
+
+func (s *Server) maybePrime(ctx context.Context, demo bool, v model.Vehicle) {
+	if demo || s.Fleet == nil || !s.DB.Linked() || !strings.EqualFold(v.State, "online") {
+		return
+	}
+	sn, err := s.DB.Snapshot(v.VIN)
+	if err == nil && !sn.UpdatedAt.IsZero() {
+		return
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	if _, loaded := s.primed.LoadOrStore(v.VIN, true); loaded {
+		return
+	}
+	up, veh, derr := s.Fleet.Data(ctx, v.VIN)
+	if derr == nil || billable(derr) {
+		_ = s.DB.AddUsage(false, "vehicle_data", 1)
+	}
+	if derr != nil {
+		_ = s.DB.SetMeta("read:"+v.VIN, publicTeslaError(derr))
+		return
+	}
+	if err := s.absorbReading(v.VIN, up, veh); err != nil {
+		slog.Error("store car reading", "err", err.Error())
+	}
+}
+
+func (s *Server) absorbReading(vin string, up telemetry.Update, veh fleet.Vehicle) error {
+	up.SignalCount = 0
+	if up.VIN == "" {
+		up.VIN = vin
+	}
+	now := time.Now()
+	name := veh.Name
+	if name == "" {
+		name = vin
+	}
+	if err := s.DB.UpsertVehicle(model.Vehicle{VIN: vin, Demo: false, Name: name, State: "online", LastSeen: &now}); err != nil {
+		return err
+	}
+	if _, err := s.Live.Apply(false, up); err != nil {
+		return err
+	}
+	_ = s.DB.SetMeta("read:"+vin, "")
+	return s.recordGrab(false, vin, "online")
+}
+
+func (s *Server) recordGrab(demo bool, vin, state string) error {
+	sn, err := s.DB.Snapshot(vin)
+	if err != nil {
+		return err
+	}
+	facts := sn.Detail
+	if facts == "" {
+		facts = "[]"
+	}
+	return s.DB.InsertGrab(vin, demo, state, grabSummary(sn), facts, sn.UpdatedAt)
+}
+
+func grabSummary(sn model.Snapshot) string {
+	parts := []string{trips.GearLabel(sn.Gear)}
+	if sn.Soc != nil {
+		parts = append(parts, fmt.Sprintf("%d%%", int(*sn.Soc+0.5)))
+	}
+	if sn.RangeMi != nil {
+		parts = append(parts, fmt.Sprintf("%.0f mi", *sn.RangeMi))
+	}
+	if sn.Locked != nil {
+		if *sn.Locked {
+			parts = append(parts, "locked")
+		} else {
+			parts = append(parts, "unlocked")
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+func publicTeslaError(err error) string {
+	var se *fleet.StatusError
+	if errors.As(err, &se) {
+		var raw map[string]any
+		if json.Unmarshal([]byte(se.Body), &raw) == nil {
+			if msg, ok := raw["error"].(string); ok && msg != "" && len(msg) < 180 {
+				return fmt.Sprintf("Tesla returned %d: %s", se.Status, msg)
+			}
+		}
+		return fmt.Sprintf("Tesla returned %d for the car reading.", se.Status)
+	}
+	return "The horn could not reach Tesla for a reading."
+}
+
+func (s *Server) rememberAccess(ctx context.Context) {
+	if s.Fleet == nil {
+		return
+	}
+	cars, err := s.DB.Vehicles(false)
+	if err != nil {
+		return
+	}
+	missing := false
+	for _, car := range cars {
+		if car.Access == "" {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		return
+	}
+	list, err := s.Fleet.List(ctx)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, v := range list {
+		seen := now
+		_ = s.DB.UpsertVehicle(model.Vehicle{VIN: v.VIN, Demo: false, Name: v.Name, State: v.State, Access: v.Access, LastSeen: &seen})
+	}
+}
+
+func driverShareProblem(access string) (string, bool) {
+	if access == "" || strings.EqualFold(access, "OWNER") {
+		return "", false
+	}
+	return "This Tesla account is a " + strings.ToLower(access) + " on this car, not the owner. Tesla only sends the allow-list to the owner.", true
+}
+
+func ownerDriverProblem(problem string) string {
+	const old = "Tesla only returns the driver list to the vehicle owner, and only when vehicle_device_data is granted."
+	const next = "Tesla refused the driver list for this car. Sign-in already includes vehicle_device_data. Tesla only gives that list to the owner of this specific car."
+	if problem == old {
+		return next
+	}
+	return problem
 }
 
 func (s *Server) focus(demoMode bool) (model.Vehicle, error) {
@@ -845,7 +1117,7 @@ func (s *Server) syncVehicles(ctx context.Context) {
 	now := time.Now()
 	for _, v := range list {
 		seen := now
-		_ = s.DB.UpsertVehicle(model.Vehicle{VIN: v.VIN, Demo: false, Name: v.Name, State: v.State, LastSeen: &seen})
+		_ = s.DB.UpsertVehicle(model.Vehicle{VIN: v.VIN, Demo: false, Name: v.Name, State: v.State, Access: v.Access, LastSeen: &seen})
 	}
 	if len(list) == 1 {
 		settings, err := s.DB.EnsureSettings()
@@ -901,6 +1173,16 @@ func (s *Server) telemetryPayload(vin string) ([]byte, error) {
 		"Locked":              map[string]any{"interval_seconds": 10},
 		"DriverSeatOccupied":  map[string]any{"interval_seconds": 10},
 		"GuestModeEnabled":    map[string]any{"interval_seconds": 10},
+		"Odometer":            map[string]any{"interval_seconds": 60},
+		"RatedRange":          map[string]any{"interval_seconds": 60},
+		"ACChargingEnergyIn":  map[string]any{"interval_seconds": 60},
+		"DCChargingEnergyIn":  map[string]any{"interval_seconds": 60},
+		"EnergyRemaining":     map[string]any{"interval_seconds": 60},
+		"LifetimeEnergyUsed":  map[string]any{"interval_seconds": 60},
+		"DetailedChargeState": map[string]any{"interval_seconds": 60},
+		"FastChargerPresent":  map[string]any{"interval_seconds": 60},
+		"FastChargerType":     map[string]any{"interval_seconds": 60},
+		"Version":             map[string]any{"interval_seconds": 3600},
 	}
 	body := map[string]any{
 		"vins": []string{vin},
@@ -983,14 +1265,67 @@ func tripView(tr model.Trip, limit float64, trim int) model.TripView {
 	if view.Polyline == nil {
 		view.Polyline = []model.LatLng{}
 	}
+	fillEconomy(&view, tr)
 	return view
 }
 
-func warnText(willWake bool) string {
-	if willWake {
-		return "This peeks once. Honk will not poll on a timer. The car is asleep, so this also wakes it: about $0.02 to wake and $0.002 for the snapshot. The $10 monthly credit is the cushion."
+func fillEconomy(view *model.TripView, tr model.Trip) {
+	if tr.DistanceMiles >= 0.2 && tr.StartKwh != nil && tr.EndKwh != nil {
+		delta := 0.0
+		switch tr.KwhKind {
+		case "lifetime":
+			delta = *tr.EndKwh - *tr.StartKwh
+		case "remaining":
+			delta = *tr.StartKwh - *tr.EndKwh
+		}
+		if delta > 0.01 {
+			wh := delta * 1000 / tr.DistanceMiles
+			view.WhPerMile = &wh
+			if tr.KwhKind == "lifetime" {
+				view.EnergyNote = "Watt-hours per mile from Tesla's lifetime energy counter."
+			} else {
+				view.EnergyNote = "Watt-hours per mile from the drop in energy remaining."
+			}
+		}
 	}
-	return "This peeks once. Honk will not poll on a timer. One vehicle_data call is about $0.002. The $10 monthly credit covers a lot of these."
+	if tr.StartRated != nil && tr.EndRated != nil {
+		used := *tr.StartRated - *tr.EndRated
+		if used > 0.05 {
+			view.RangeUsed = &used
+			if tr.RangeKind == "rated" {
+				view.RangeNote = "Rated miles used"
+			} else {
+				view.RangeNote = "Estimated range used"
+			}
+		}
+	}
+}
+
+func canWake(state string) bool {
+	switch strings.ToLower(state) {
+	case "asleep", "offline":
+		return true
+	default:
+		return false
+	}
+}
+
+func warnText(state string) string {
+	switch strings.ToLower(state) {
+	case "asleep":
+		return "This peeks once. Honk will not poll on a timer. The car is asleep, so this also wakes it: about $0.02 to wake and $0.002 for the snapshot. The $10 monthly credit is the cushion."
+	case "offline":
+		return "This peeks once. Honk will not poll on a timer. Tesla lists this car as offline, which usually means it is asleep and out of touch. This tries one wake, about $0.02, then one snapshot if it comes online. It will not keep trying."
+	default:
+		return "This peeks once. Honk will not poll on a timer. One vehicle_data call is about $0.002. The $10 monthly credit covers a lot of these."
+	}
+}
+
+func vinSuffix(vin string) string {
+	if len(vin) <= 6 {
+		return vin
+	}
+	return vin[len(vin)-6:]
 }
 
 func billable(err error) bool {
@@ -1106,4 +1441,3 @@ func (h *hub) publish(demoMode bool, name string, v any) {
 		}
 	}
 }
-

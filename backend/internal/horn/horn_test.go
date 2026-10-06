@@ -18,6 +18,14 @@ func TestGuestModeDoesNotNameTheDriver(t *testing.T) {
 	}
 }
 
+func TestOfflineIsNotCalledAsleep(t *testing.T) {
+	seen := time.Date(2026, 10, 6, 15, 4, 0, 0, time.Local)
+	h := Line("offline", nil, 75, nil, nil, false, &seen, seen)
+	if strings.Contains(strings.ToLower(h.Line), "asleep") || !strings.Contains(h.Line, "offline") {
+		t.Fatal(h.Line)
+	}
+}
+
 func TestSpeedCopy(t *testing.T) {
 	speed := 82.2
 	h := Line("online", &speed, 75, nil, nil, true, nil, time.Now())

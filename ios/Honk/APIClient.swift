@@ -43,10 +43,10 @@ struct APIClient {
         try await send(path, method: "PUT", body: json, expecting: T.self)
     }
 
-    func data(_ path: String, method: String, json: Any? = nil) async throws -> (Int, Data) {
+    func data(_ path: String, method: String, json: Any? = nil, timeout: TimeInterval = 40) async throws -> (Int, Data) {
         var request = URLRequest(url: url(path))
         request.httpMethod = method
-        request.timeoutInterval = 40
+        request.timeoutInterval = timeout
         if let token, !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }

@@ -41,13 +41,13 @@ func newTestServer(t *testing.T) *Server {
 	}
 	root := repoRoot(t)
 	cfg := config.Config{
-		Domain:         "skylar.snapcollectibles.com",
-		RedirectURI:    "https://skylar.snapcollectibles.com/path",
-		IngestToken:    "test-ingest-token",
-		DocsDir:        filepath.Join(root, "docs"),
-		PublicKeyFile:  filepath.Join(root, "docs", ".well-known", "appspecific", "com.tesla.3p.public-key.pem"),
-		FleetAPIBase:   "https://fleet-api.prd.na.vn.cloud.tesla.com",
-		DemoAutoplay:   false,
+		Domain:        "skylar.snapcollectibles.com",
+		RedirectURI:   "https://skylar.snapcollectibles.com/path",
+		IngestToken:   "test-ingest-token",
+		DocsDir:       filepath.Join(root, "docs"),
+		PublicKeyFile: filepath.Join(root, "docs", ".well-known", "appspecific", "com.tesla.3p.public-key.pem"),
+		FleetAPIBase:  "https://fleet-api.prd.na.vn.cloud.tesla.com",
+		DemoAutoplay:  false,
 	}
 	svc := &live.Service{DB: db}
 	s := New(cfg, db, svc)
@@ -134,6 +134,25 @@ func TestPathAndPublicKey(t *testing.T) {
 	}
 }
 
+func TestTeslaFinishRejectsUnknownState(t *testing.T) {
+	s := newTestServer(t)
+	h := s.Handler()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/tesla/finish", strings.NewReader(`{"code":"abc","state":"nope"}`))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Sign-in expired") {
+		t.Fatalf("finish %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/auth/tesla/finish", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty finish %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestIngestCreatesTripAndSpeedAlert(t *testing.T) {
 	s := newTestServer(t)
 	body := `{
@@ -178,27 +197,55 @@ func TestIngestCreatesTripAndSpeedAlert(t *testing.T) {
 type fakeFleet struct {
 	gets, wakes, datas int
 	state              string
+	soc                float64
+	wakeState          string
+	list               []fleet.Vehicle
+	driverCalls        int
+	driverList         []model.Driver
+	rawCalls           int
+	lastPath           string
+	lastMethod         string
+	rawStatus          int
+	rawBody            []byte
 }
 
-func (f *fakeFleet) List(context.Context) ([]fleet.Vehicle, error) { return nil, nil }
+func (f *fakeFleet) List(context.Context) ([]fleet.Vehicle, error) { return f.list, nil }
 func (f *fakeFleet) Get(context.Context, string) (fleet.Vehicle, error) {
 	f.gets++
 	return fleet.Vehicle{VIN: "5YJ3SKYLARLIVE001", Name: "Skylar's Real Car", State: f.state}, nil
 }
 func (f *fakeFleet) Wake(context.Context, string) (fleet.Vehicle, error) {
 	f.wakes++
-	f.state = "online"
-	return fleet.Vehicle{VIN: "5YJ3SKYLARLIVE001", Name: "Skylar's Real Car", State: "online"}, nil
+	if f.wakeState != "" {
+		f.state = f.wakeState
+	} else {
+		f.state = "online"
+	}
+	return fleet.Vehicle{VIN: "5YJ3SKYLARLIVE001", Name: "Skylar's Real Car", State: f.state}, nil
 }
 func (f *fakeFleet) Data(context.Context, string) (telemetry.Update, fleet.Vehicle, error) {
 	f.datas++
 	speed := 0.0
 	gear := "P"
-	return telemetry.Update{VIN: "5YJ3SKYLARLIVE001", At: time.Now(), SpeedMph: &speed, Gear: &gear, SignalCount: 1},
-		fleet.Vehicle{VIN: "5YJ3SKYLARLIVE001", Name: "Skylar's Real Car", State: "online"}, nil
+	up := telemetry.Update{VIN: "5YJ3SKYLARLIVE001", At: time.Now(), SpeedMph: &speed, Gear: &gear, SignalCount: 1}
+	if f.soc != 0 {
+		soc := f.soc
+		up.Soc = &soc
+	}
+	return up, fleet.Vehicle{VIN: "5YJ3SKYLARLIVE001", Name: "Skylar's Real Car", State: "online"}, nil
 }
 func (f *fakeFleet) Drivers(context.Context, string) (int, []model.Driver, string, error) {
-	return 200, nil, "", nil
+	f.driverCalls++
+	return 200, f.driverList, "", nil
+}
+func (f *fakeFleet) Do(_ context.Context, method, path string, _ any) (int, []byte, error) {
+	f.rawCalls++
+	f.lastMethod = method
+	f.lastPath = path
+	if f.rawStatus != 0 {
+		return f.rawStatus, f.rawBody, nil
+	}
+	return 200, []byte(`{"response":[]}`), nil
 }
 
 func TestRefreshConfirmWakesOnce(t *testing.T) {
@@ -246,5 +293,129 @@ func TestRefreshConfirmWakesOnce(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "Skylar's Real Car") {
 		t.Fatal(rec.Body.String())
+	}
+}
+
+func TestOfflineConfirmWakesOnce(t *testing.T) {
+	s := newTestServer(t)
+	seen := time.Now().Add(-time.Hour)
+	if err := s.DB.UpsertVehicle(model.Vehicle{
+		VIN: "5YJ3SKYLARLIVE001", Demo: false, Name: "Skylar's Real Car", State: "offline", LastSeen: &seen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SaveTeslaAuth(model.TeslaAuth{
+		AccessToken: "test-access", RefreshToken: "test-refresh", Expiry: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeFleet{state: "offline", wakeState: "offline"}
+	s.Fleet = fake
+	token := sessionToken(t, s, false)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, authed(http.MethodPost, "/api/refresh", token, `{"confirm":false}`))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "offline") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if fake.wakes != 0 || fake.datas != 0 {
+		t.Fatalf("peeked early wake=%d data=%d", fake.wakes, fake.datas)
+	}
+
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, authed(http.MethodPost, "/api/refresh", token, `{"confirm":true}`))
+	if rec.Code != http.StatusOK || fake.wakes != 1 || fake.datas != 0 || !strings.Contains(rec.Body.String(), "tried one wake") {
+		t.Fatalf("code=%d wakes=%d datas=%d %s", rec.Code, fake.wakes, fake.datas, rec.Body.String())
+	}
+
+	fake.wakeState = ""
+	fake.state = "offline"
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, authed(http.MethodPost, "/api/refresh", token, `{"confirm":true}`))
+	if rec.Code != http.StatusOK || fake.wakes != 2 || fake.datas != 1 || strings.Contains(rec.Body.String(), "tried one wake") {
+		t.Fatalf("online after wake code=%d wakes=%d datas=%d %s", rec.Code, fake.wakes, fake.datas, rec.Body.String())
+	}
+}
+
+func TestDriverShareSkipsAllowListAndOwnerShowsIt(t *testing.T) {
+	s := newTestServer(t)
+	seen := time.Now()
+	if err := s.DB.UpsertVehicle(model.Vehicle{VIN: "5YJ3SKYLARLIVE001", Demo: false, Name: "Cybertruck", State: "online", LastSeen: &seen}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.UpsertVehicle(model.Vehicle{VIN: "5YJYGDEE0LF000002", Demo: false, Name: "YQQ", State: "online", LastSeen: &seen}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SaveTeslaAuth(model.TeslaAuth{
+		AccessToken: "test-access", RefreshToken: "test-refresh", Expiry: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeFleet{
+		list: []fleet.Vehicle{
+			{VIN: "5YJ3SKYLARLIVE001", Name: "Cybertruck", State: "online", Access: "DRIVER"},
+			{VIN: "5YJYGDEE0LF000002", Name: "YQQ", State: "online", Access: "OWNER"},
+		},
+		driverList: []model.Driver{{Name: "Allowed Person", Detail: "Allowed on this car."}},
+	}
+	s.Fleet = fake
+	token := sessionToken(t, s, false)
+	h := s.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authed(http.MethodGet, "/api/drivers?refresh=1", token, ""))
+	if rec.Code != http.StatusOK || fake.driverCalls != 0 || !strings.Contains(rec.Body.String(), "not the owner") {
+		t.Fatalf("share %d calls=%d %s", rec.Code, fake.driverCalls, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authed(http.MethodPost, "/api/vehicles/select", token, `{"vin":"5YJYGDEE0LF000002"}`))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"access":"OWNER"`) {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authed(http.MethodGet, "/api/drivers?refresh=1", token, ""))
+	if rec.Code != http.StatusOK || fake.driverCalls != 1 || !strings.Contains(rec.Body.String(), "Allowed Person") {
+		t.Fatalf("owner %d calls=%d %s", rec.Code, fake.driverCalls, rec.Body.String())
+	}
+}
+
+func TestOnlineCarIsReadOnceAndCanSwitch(t *testing.T) {
+	s := newTestServer(t)
+	seen := time.Now()
+	if err := s.DB.UpsertVehicle(model.Vehicle{VIN: "5YJ3SKYLARLIVE001", Demo: false, Name: "A Car", State: "online", LastSeen: &seen}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.UpsertVehicle(model.Vehicle{VIN: "5YJYGDEE0LF000002", Demo: false, Name: "Z Car", State: "offline", LastSeen: &seen}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.SaveTeslaAuth(model.TeslaAuth{
+		AccessToken: "test-access", RefreshToken: "test-refresh", Expiry: time.Now().Add(time.Hour),
+		Scopes: "openid vehicle_device_data",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeFleet{state: "online", soc: 64}
+	s.Fleet = fake
+	token := sessionToken(t, s, false)
+	h := s.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authed(http.MethodGet, "/api/garage", token, ""))
+	if rec.Code != http.StatusOK || fake.datas != 1 || !strings.Contains(rec.Body.String(), "Skylar's Real Car") || !strings.Contains(rec.Body.String(), "Z Car") {
+		t.Fatalf("first garage %d datas=%d %s", rec.Code, fake.datas, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"soc":64`) && !strings.Contains(rec.Body.String(), `"soc":64.`) {
+		t.Fatal(rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authed(http.MethodGet, "/api/garage", token, ""))
+	if fake.datas != 1 {
+		t.Fatalf("second garage polled vehicle_data datas=%d", fake.datas)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authed(http.MethodPost, "/api/vehicles/select", token, `{"vin":"5YJYGDEE0LF000002"}`))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Z Car") || fake.datas != 1 {
+		t.Fatalf("select %d datas=%d %s", rec.Code, fake.datas, rec.Body.String())
 	}
 }

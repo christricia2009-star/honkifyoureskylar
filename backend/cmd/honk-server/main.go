@@ -48,6 +48,7 @@ func main() {
 	}
 	srv.UseFleet()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go srv.PrimeAwake(ctx)
 	defer stop()
 	if cfg.DemoAutoplay {
 		go demo.Run(ctx, svc)

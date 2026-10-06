@@ -2,10 +2,12 @@ package live
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/christricia2009-star/honkifyoureskylar/backend/internal/alerts"
+	"github.com/christricia2009-star/honkifyoureskylar/backend/internal/ledger"
 	"github.com/christricia2009-star/honkifyoureskylar/backend/internal/model"
 	"github.com/christricia2009-star/honkifyoureskylar/backend/internal/store"
 	"github.com/christricia2009-star/honkifyoureskylar/backend/internal/telemetry"
@@ -79,14 +81,18 @@ func (s *Service) Apply(demo bool, up telemetry.Update) ([]model.Alert, error) {
 	if res.Open != nil {
 		res.Open.VIN = up.VIN
 		res.Open.Demo = demo
-		if err := s.DB.SaveTrip(modelFromOpen(res.Open, limit, false)); err != nil {
+		tr := modelFromOpen(res.Open, limit, false)
+		applyEconomy(&tr, current, up, res.Started)
+		if err := s.DB.SaveTrip(tr); err != nil {
 			return nil, err
 		}
 	}
 	if res.Ended != nil {
 		res.Ended.VIN = up.VIN
 		res.Ended.Demo = demo
-		if err := s.DB.SaveTrip(modelFromOpen(res.Ended, limit, true)); err != nil {
+		tr := modelFromOpen(res.Ended, limit, true)
+		applyEconomy(&tr, current, up, false)
+		if err := s.DB.SaveTrip(tr); err != nil {
 			return nil, err
 		}
 	}
@@ -123,10 +129,67 @@ func (s *Service) Apply(demo bool, up telemetry.Update) ([]model.Alert, error) {
 		}
 		made = append(made, a)
 	}
+	if err := s.DB.Observe(demo, up.VIN, readingFrom(sn, up)); err != nil {
+		return nil, err
+	}
 	if s.OnChange != nil {
 		s.OnChange(demo, made)
 	}
 	return made, nil
+}
+
+func readingFrom(sn model.Snapshot, up telemetry.Update) ledger.Reading {
+	return ledger.Reading{
+		At: up.At, Gear: sn.Gear, Charge: sn.ChargeState, Soc: sn.Soc, EstRange: sn.RangeMi,
+		RatedRange: up.RatedRangeMi, Odometer: sn.Odometer, EnergyAddedKwh: up.EnergyAddedKwh,
+		ACEnergyKwh: up.ACEnergyKwh, DCEnergyKwh: up.DCEnergyKwh, LifetimeKwh: up.LifetimeKwh,
+		RemainingKwh: up.EnergyRemainingKwh, Fast: up.Fast, FastType: up.FastType, Software: up.Software,
+	}
+}
+
+func applyEconomy(tr *model.Trip, prev *model.Trip, up telemetry.Update, started bool) {
+	if prev != nil && prev.ID == tr.ID {
+		tr.StartSoc = prev.StartSoc
+		tr.EndSoc = prev.EndSoc
+		tr.StartRated = prev.StartRated
+		tr.EndRated = prev.EndRated
+		tr.RangeKind = prev.RangeKind
+		tr.StartKwh = prev.StartKwh
+		tr.EndKwh = prev.EndKwh
+		tr.KwhKind = prev.KwhKind
+	}
+	if up.Soc != nil && (started || tr.StartSoc == nil) {
+		tr.StartSoc = up.Soc
+	}
+	if up.Soc != nil {
+		tr.EndSoc = up.Soc
+	}
+	if up.RatedRangeMi != nil {
+		if tr.RangeKind != "rated" || tr.StartRated == nil {
+			tr.StartRated = up.RatedRangeMi
+			tr.RangeKind = "rated"
+		}
+		tr.EndRated = up.RatedRangeMi
+	} else if up.RangeMi != nil && tr.RangeKind != "rated" {
+		if tr.StartRated == nil {
+			tr.StartRated = up.RangeMi
+			tr.RangeKind = "estimated"
+		}
+		tr.EndRated = up.RangeMi
+	}
+	if up.LifetimeKwh != nil {
+		if tr.KwhKind != "lifetime" || tr.StartKwh == nil {
+			tr.StartKwh = up.LifetimeKwh
+			tr.KwhKind = "lifetime"
+		}
+		tr.EndKwh = up.LifetimeKwh
+	} else if up.EnergyRemainingKwh != nil && tr.KwhKind != "lifetime" {
+		if tr.StartKwh == nil {
+			tr.StartKwh = up.EnergyRemainingKwh
+			tr.KwhKind = "remaining"
+		}
+		tr.EndKwh = up.EnergyRemainingKwh
+	}
 }
 
 func (s *Service) ensureVehicle(demo bool, up telemetry.Update) error {
@@ -183,6 +246,11 @@ func merge(sn *model.Snapshot, up telemetry.Update) {
 	}
 	if up.Odometer != nil {
 		sn.Odometer = up.Odometer
+	}
+	if len(up.Facts) > 0 {
+		if b, err := json.Marshal(up.Facts); err == nil {
+			sn.Detail = string(b)
+		}
 	}
 	sn.UpdatedAt = up.At
 	if sn.DoorSummary == "" {

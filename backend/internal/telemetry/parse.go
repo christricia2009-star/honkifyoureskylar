@@ -6,35 +6,47 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/christricia2009-star/honkifyoureskylar/backend/internal/model"
 )
 
 // Update is a partial snapshot. Nil fields are left alone.
 type Update struct {
-	At           time.Time
-	VIN          string
-	SpeedMph     *float64
-	Gear         *string
-	Lat          *float64
-	Lng          *float64
-	Soc          *float64
-	RangeMi      *float64
-	Charge       *string
-	DoorsOpen    *bool
-	DoorSummary  *string
-	Locked       *bool
-	Seat         *bool
-	Guest        *bool
-	Odometer     *float64
-	SignalCount  int
-	Online       *bool
+	At                 time.Time
+	VIN                string
+	SpeedMph           *float64
+	Gear               *string
+	Lat                *float64
+	Lng                *float64
+	Soc                *float64
+	RangeMi            *float64
+	Charge             *string
+	DoorsOpen          *bool
+	DoorSummary        *string
+	Locked             *bool
+	Seat               *bool
+	Guest              *bool
+	Odometer           *float64
+	RatedRangeMi       *float64
+	EnergyAddedKwh     *float64
+	ACEnergyKwh        *float64
+	DCEnergyKwh        *float64
+	LifetimeKwh        *float64
+	EnergyRemainingKwh *float64
+	Fast               *bool
+	FastType           string
+	Software           string
+	SignalCount        int
+	Online             *bool
+	Facts              []model.Fact
 }
 
 type record struct {
-	CreatedAt string          `json:"createdAt"`
-	Created   string          `json:"created_at"`
-	VIN       string          `json:"vin"`
-	Data      []datum         `json:"data"`
-	Signals   map[string]any  `json:"signals"`
+	CreatedAt string         `json:"createdAt"`
+	Created   string         `json:"created_at"`
+	VIN       string         `json:"vin"`
+	Data      []datum        `json:"data"`
+	Signals   map[string]any `json:"signals"`
 }
 
 type datum struct {
@@ -172,6 +184,51 @@ func applySignal(up *Update, key string, value any) {
 			up.Odometer = &n
 			up.SignalCount++
 		}
+	case "RatedRange":
+		if n, ok := asFloat(value); ok {
+			up.RatedRangeMi = &n
+			up.SignalCount++
+		}
+	case "ACChargingEnergyIn":
+		if n, ok := asFloat(value); ok {
+			up.ACEnergyKwh = &n
+			up.SignalCount++
+		}
+	case "DCChargingEnergyIn":
+		if n, ok := asFloat(value); ok {
+			up.DCEnergyKwh = &n
+			up.SignalCount++
+		}
+	case "LifetimeEnergyUsed":
+		if n, ok := asFloat(value); ok {
+			up.LifetimeKwh = &n
+			up.SignalCount++
+		}
+	case "EnergyRemaining":
+		if n, ok := asFloat(value); ok {
+			up.EnergyRemainingKwh = &n
+			up.SignalCount++
+		}
+	case "FastChargerPresent":
+		if b, ok := asBool(value); ok {
+			up.Fast = &b
+			up.SignalCount++
+		}
+	case "FastChargerType":
+		if s, ok := asString(value); ok {
+			up.FastType = s
+			up.SignalCount++
+		}
+	case "Version":
+		if s, ok := asString(value); ok && s != "" {
+			up.Software = s
+			up.SignalCount++
+		}
+	case "SoftwareUpdateVersion":
+		if s, ok := asString(value); ok && s != "" && up.Software == "" {
+			up.Software = s
+			up.SignalCount++
+		}
 	}
 }
 
@@ -202,6 +259,10 @@ func asFloat(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:
 		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
 	case json.Number:
 		f, err := n.Float64()
 		return f, err == nil
