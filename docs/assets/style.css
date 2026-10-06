@@ -1,0 +1,58 @@
+:root {
+  color-scheme: light;
+  --ink: #2e2940;
+  --paper: #fff6f2;
+  --blush: #ffd6e0;
+  --butter: #fff1c2;
+  --mint: #d7f5e8;
+  --lilac: #e6dcff;
+  --horn: #f2546d;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  background: var(--paper);
+  color: var(--ink);
+}
+main { max-width: 40rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+h1 { font-size: 2.2rem; line-height: 1.1; margin-bottom: 0.4rem; }
+.badge {
+  display: inline-block;
+  background: var(--horn);
+  color: white;
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  font-family: ui-rounded, "Avenir Next", sans-serif;
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+}
+.bubble {
+  background: white;
+  border-radius: 1.4rem;
+  padding: 1rem 1.1rem;
+  margin: 1.2rem 0;
+  box-shadow: 0 8px 24px rgba(46, 41, 64, 0.06);
+}
+.bubble:before {
+  content: "";
+  display: block;
+  width: 14px;
+  height: 14px;
+  background: white;
+  transform: rotate(45deg);
+  margin-top: -1.35rem;
+  margin-left: 1.4rem;
+}
+.card {
+  background: var(--blush);
+  border-radius: 1.2rem;
+  padding: 1rem 1.1rem;
+  margin: 0.8rem 0;
+}
+.card.mint { background: var(--mint); }
+.card.butter { background: var(--butter); }
+.card.lilac { background: var(--lilac); }
+a { color: #9d2340; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+footer { margin-top: 2rem; font-size: 0.9rem; }

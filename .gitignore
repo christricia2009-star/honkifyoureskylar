@@ -1,0 +1,13 @@
+.DS_Store
+.env
+**/.env
+backend/secrets/
+backend/data/
+*.db
+*.p8
+AuthKey_*.p8
+ios/build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.idea/
