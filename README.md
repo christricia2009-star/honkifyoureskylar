@@ -15,11 +15,13 @@ The phone signs in through the owner's server. Tesla tokens stay on the server. 
 
 GitHub Pages is not the host. Do not point this name at `github.io`. That would take the domain away from the site Tesla can already fetch.
 
+The Vercel project's root directory is `docs`. A production deploy of the repository root serves an empty site and those URLs return 404. Leave the root directory on `docs`.
+
 The static site is only the public proof of those URLs. Sign in with Tesla finishes only when the Go server receives `GET /path?code=...`, exchanges the code, and redirects to `honkifyoureskylar://auth?code=...`. Until the Go server owns the domain, use the local demo.
 
 ## Tesla developer portal
 
-In the application **Honk if You're Skylar**, leave the client URLs exactly as they are and click **Update**:
+The application **Honk if You're Skylar** was approved, and the North America partner account was registered on 2026-10-06. Tesla stored the hosted public key for `skylar.snapcollectibles.com`. Leave the client URLs exactly as they are:
 
 | Field | Value |
 | --- | --- |
@@ -27,7 +29,7 @@ In the application **Honk if You're Skylar**, leave the client URLs exactly as t
 | Allowed Redirect URI | `https://skylar.snapcollectibles.com/path` |
 | Allowed Returned URL | `https://skylar.snapcollectibles.com` |
 
-The earlier rejection, "Invalid Origin, Redirect, or Return URI/URL", was a 404 from an empty Vercel project. The certificate was already valid. Those paths now answer 200. Do not change the three URLs before you click Update.
+The earlier rejection, "Invalid Origin, Redirect, or Return URI/URL", was a 404 from an empty Vercel project. The certificate was already valid. Do not change the three URLs.
 
 OAuth grant: Authorization Code and Machine-to-Machine (authorization code and client credentials).
 
@@ -98,7 +100,7 @@ curl -s http://127.0.0.1:8080/api/health
 
 ## Register the partner account
 
-Do this after the public key URL returns 200, which it does, and after the portal application is no longer rejected. Registration is once per region. The domain must match the root of the allowed origin.
+This was done for North America on 2026-10-06. Tesla returned the domain and the same public key that is hosted above. Register again only for another region, or after replacing the key pair. The domain must match the root of the allowed origin. The commands below are the ones that were used:
 
 From `backend/`, with `.env` loaded:
 
@@ -171,7 +173,7 @@ Quoted values are fine. The loader strips one pair of surrounding quotes and doe
 
 ## Billing
 
-Tesla's published case studies imply these estimates. They are not a live rate card. Confirm the table in the portal.
+Tesla's published case studies imply these estimates. They are not a live rate card. Confirm the table in the portal. The partner account is on the pay-as-you-go tier. Add a card in the developer portal and set the billing cap to $10. A cap of $0 disables the API.
 
 | Call | Estimate |
 | --- | --- |

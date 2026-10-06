@@ -13,3 +13,5 @@ xcuserdata/
 .idea/
 .vercel/
 docs/.vercel/
+.env.local
+**/.env.local
